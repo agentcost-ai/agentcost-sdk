@@ -41,19 +41,24 @@ class DynamicPricingManager:
             base_url: Backend URL to fetch from
             
         Returns:
-            Pricing dictionary (1600+ models if synced from backend)
+            Pricing dictionary (1900+ models if synced from backend)
         """
         with self._lock:
             now = time.time()
-            
+
             needs_fetch = (
                 not self._pricing_cache or
                 (self._last_fetch and now - self._last_fetch > self._fetch_interval)
             )
-            
+
             if needs_fetch and base_url and not self._fetch_in_progress:
-                self._fetch_pricing(base_url)
-            
+                self._fetch_in_progress = True
+                threading.Thread(
+                    target=self._fetch_pricing,
+                    args=(base_url,),
+                    daemon=True,
+                ).start()
+
             return self._pricing_cache if self._pricing_cache else DEFAULT_PRICING
     
     def _fetch_pricing(self, base_url: str) -> None:
@@ -61,7 +66,7 @@ class DynamicPricingManager:
         if self._fetch_attempted and self._pricing_cache:
             # Already have cached data, don't retry aggressively
             return
-        
+
         self._fetch_in_progress = True
         self._fetch_attempted = True
         
