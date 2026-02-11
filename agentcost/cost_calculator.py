@@ -41,7 +41,7 @@ class DynamicPricingManager:
             base_url: Backend URL to fetch from
             
         Returns:
-            Pricing dictionary (1900+ models if synced from backend)
+            Pricing dictionary (2000+ models if synced from backend)
         """
         with self._lock:
             now = time.time()
