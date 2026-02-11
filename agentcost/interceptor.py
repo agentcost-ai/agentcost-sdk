@@ -227,10 +227,8 @@ class LangChainInterceptor:
             
             model_name = _get_model_name(llm_self)
             
-            agent_name = kwargs.pop('_agentcost_agent', None)
-            if not agent_name and config:
-                agent_name = config.default_agent_name
-            agent_name = agent_name or 'default'
+            explicit_agent = kwargs.pop('_agentcost_agent', None)
+            agent_name = _get_effective_agent_name(config, explicit_agent)
             
             start_time = time.time()
             
