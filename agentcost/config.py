@@ -6,7 +6,7 @@ Prices are per 1,000 tokens in USD.
 
 The SDK uses a tiered pricing lookup:
 1. Custom pricing (user-provided)
-2. Dynamic pricing from backend (/v1/pricing, 1600+ models)
+2. Dynamic pricing from backend (/v1/pricing, 1900+ models)
 3. DEFAULT_PRICING fallback (for offline/local mode)
 """
 
