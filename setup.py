@@ -30,7 +30,7 @@ setup(
     url="https://github.com/agentcost-ai/agentcost-sdk",
     project_urls={
         "Bug Tracker": "https://github.com/agentcost-ai/agentcost-sdk/issues",
-        "Documentation": "https://agentcost.tech/docs/sdk",
+        "Documentation": "https://www.agentcost.tech/docs/sdk",
     },
     license="MIT",
     classifiers=[
