@@ -1,6 +1,6 @@
 # AgentCost SDK
 
-**Zero-friction LLM cost tracking for LangChain applications.**
+**Zero-friction LLM cost tracking for OpenAI, Anthropic, and LangChain applications.**
 
 ## Installation
 
@@ -23,17 +23,26 @@ from agentcost import track_costs
 # 2 lines to add cost tracking!
 track_costs.init(api_key="your_api_key", project_id="my-project")
 
-# Your existing code works unchanged
-from langchain_openai import ChatOpenAI
+# OpenAI — automatically tracked
+from openai import OpenAI
+client = OpenAI()
+response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": "Hello!"}])
 
+# Anthropic — automatically tracked
+from anthropic import Anthropic
+client = Anthropic()
+message = client.messages.create(model="claude-3-5-sonnet-20241022", max_tokens=100, messages=[{"role": "user", "content": "Hello!"}])
+
+# LangChain — automatically tracked
+from langchain_openai import ChatOpenAI
 llm = ChatOpenAI(model="gpt-4")
-response = llm.invoke("Hello!")  # Automatically tracked
+response = llm.invoke("Hello!")
 ```
 
 ## Features
 
-- **Zero Code Changes**: Monkey patches LangChain - your code works as-is
-- **Automatic Tracking**: Captures all `invoke()`, `ainvoke()`, `stream()`, `astream()` calls
+- **Zero Code Changes**: Monkey patches OpenAI, Anthropic, and LangChain — your code works as-is
+- **Automatic Tracking**: Captures all `create()`, `invoke()`, `ainvoke()`, `stream()`, `astream()` calls
 - **Accurate Tokens**: Uses `tiktoken` for precise token counting
 - **Real-Time Costs**: Calculates costs using up-to-date model pricing
 - **Batched Sending**: Efficient network usage (size-based + time-based batching)
