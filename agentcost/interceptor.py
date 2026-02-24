@@ -11,6 +11,7 @@ Supports:
 
 import time
 import hashlib
+import threading
 from functools import wraps
 from typing import Any, Callable, Optional, Iterator, AsyncIterator
 from datetime import datetime, timezone
@@ -18,6 +19,14 @@ from datetime import datetime, timezone
 from .token_counter import TokenCounter
 from .cost_calculator import calculate_cost
 from .config import get_config
+
+# Shared cross-interceptor guard.  When a LangChain invoke() wraps an OpenAI
+# or Anthropic SDK call, this depth counter prevents the lower-level
+# interceptor from emitting a duplicate event.
+try:
+    from .openai_interceptor import _tracking_depth
+except ImportError:
+    _tracking_depth = threading.local()
 
 
 def _get_effective_agent_name(config, explicit: Optional[str] = None) -> str:
@@ -152,6 +161,10 @@ class LangChainInterceptor:
             if config and not config.enabled:
                 return original_invoke(llm_self, input_data, *args, **kwargs)
             
+            # Set guard so downstream OpenAI/Anthropic interceptors skip
+            prev_depth = getattr(_tracking_depth, 'value', 0)
+            _tracking_depth.value = prev_depth + 1
+            
             model_name = _get_model_name(llm_self)
             
             explicit_agent = kwargs.pop('_agentcost_agent', None)
@@ -214,6 +227,8 @@ class LangChainInterceptor:
                 except Exception as callback_error:
                     if config and config.debug:
                         print(f"[AgentCost] Event callback error: {callback_error}")
+                
+                _tracking_depth.value = prev_depth
         
         return tracked_invoke
     
@@ -233,6 +248,9 @@ class LangChainInterceptor:
             
             if config and not config.enabled:
                 return await original_ainvoke(llm_self, input_data, *args, **kwargs)
+            
+            prev_depth = getattr(_tracking_depth, 'value', 0)
+            _tracking_depth.value = prev_depth + 1
             
             model_name = _get_model_name(llm_self)
             
@@ -298,6 +316,8 @@ class LangChainInterceptor:
                 except Exception as callback_error:
                     if config and config.debug:
                         print(f"[AgentCost] Event callback error: {callback_error}")
+                
+                _tracking_depth.value = prev_depth
         
         return tracked_ainvoke
     
@@ -318,6 +338,9 @@ class LangChainInterceptor:
             if config and not config.enabled:
                 yield from original_stream(llm_self, input_data, *args, **kwargs)
                 return
+            
+            prev_depth = getattr(_tracking_depth, 'value', 0)
+            _tracking_depth.value = prev_depth + 1
             
             model_name = _get_model_name(llm_self)
             explicit_agent = kwargs.pop('_agentcost_agent', None)
@@ -380,6 +403,8 @@ class LangChainInterceptor:
                 except Exception as callback_error:
                     if config and config.debug:
                         print(f"[AgentCost] Event callback error: {callback_error}")
+                
+                _tracking_depth.value = prev_depth
         
         return tracked_stream
     
@@ -402,6 +427,9 @@ class LangChainInterceptor:
                 async for chunk in original_astream(llm_self, input_data, *args, **kwargs):
                     yield chunk
                 return
+            
+            prev_depth = getattr(_tracking_depth, 'value', 0)
+            _tracking_depth.value = prev_depth + 1
             
             # Extract model and agent info
             model_name = _get_model_name(llm_self)
@@ -468,6 +496,8 @@ class LangChainInterceptor:
                 except Exception as callback_error:
                     if config and config.debug:
                         print(f"[AgentCost] Event callback error: {callback_error}")
+                
+                _tracking_depth.value = prev_depth
         
         return tracked_astream
 

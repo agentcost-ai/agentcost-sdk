@@ -10,13 +10,13 @@ from setuptools import setup, find_packages
 
 def get_version() -> str:
     """Read version from VERSION file (single source of truth)."""
-    version_file = Path(__file__).parent.parent / "VERSION"
+    version_file = Path(__file__).parent / "VERSION"
     if version_file.exists():
         return version_file.read_text().strip()
     return "0.1.1"
 
 
-with open("README.md", "r", encoding="utf-8") as fh:
+with open(Path(__file__).parent / "README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
@@ -24,7 +24,7 @@ setup(
     version=get_version(),
     author="Kushagra Agrawal",
     author_email="kushagraagrawal128@gmail.com",
-    description="Track LLM costs in LangChain applications with zero code changes",
+    description="Track LLM costs across OpenAI, Anthropic, LangChain, and 1900+ models with zero code changes",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/agentcost-ai/agentcost-sdk",
@@ -52,9 +52,22 @@ setup(
     install_requires=[
         "tiktoken>=0.5.0",
         "requests>=2.28.0",
-        "langchain-core>=0.1.0",
     ],
     extras_require={
+        "openai": [
+            "openai>=1.0.0",
+        ],
+        "anthropic": [
+            "anthropic>=0.18.0",
+        ],
+        "langchain": [
+            "langchain-core>=0.1.0",
+        ],
+        "all": [
+            "openai>=1.0.0",
+            "anthropic>=0.18.0",
+            "langchain-core>=0.1.0",
+        ],
         "dev": [
             "pytest>=7.0.0",
             "pytest-asyncio>=0.21.0",
@@ -63,23 +76,19 @@ setup(
             "mypy>=1.0.0",
             "ruff>=0.1.0",
         ],
-        "langchain": [
-            "langchain>=0.1.0",
-            "langchain-openai>=0.0.5",
-            "langchain-anthropic>=0.1.0",
-        ],
     },
     keywords=[
         "llm",
-        "langchain",
         "openai",
         "anthropic",
+        "langchain",
+        "langgraph",
+        "ai-agents",
         "cost-tracking",
         "tokens",
-        "ai",
-        "monitoring",
         "observability",
-        "langchain ai agents cost tracking monitoring"
+        "monitoring",
+        "llm-cost",
     ],
     include_package_data=True,
 )

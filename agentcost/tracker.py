@@ -9,7 +9,6 @@ from typing import Dict, Any, Optional, List
 from contextlib import contextmanager
 
 from .config import AgentCostConfig, set_config, get_config
-from .interceptor import LangChainInterceptor
 from .batcher import HybridBatcher, LocalBatcher
 from .http_client import AgentCostHTTPClient, MockHTTPClient
 
@@ -71,7 +70,7 @@ class AgentCostTracker:
     
     def __init__(self):
         self._config: Optional[AgentCostConfig] = None
-        self._interceptor: Optional[LangChainInterceptor] = None
+        self._interceptors: List = []  # All active interceptors
         self._batcher: Optional[HybridBatcher] = None
         self._http_client: Optional[AgentCostHTTPClient] = None
         self._is_initialized = False
@@ -174,16 +173,57 @@ class AgentCostTracker:
                 debug=debug,
             )
         
-        self._interceptor = LangChainInterceptor(
-            event_callback=self._batcher.add
-        )
+        # Auto-detect and start all available framework interceptors.
+        # Each interceptor patches the SDK it finds installed; if the SDK
+        # is not present the interceptor returns False and is skipped.
+        self._interceptors = []
+        interceptor_classes = []
         
-        if self._interceptor.start():
+        # LangChain (covers LangGraph, CrewAI-via-LangChain)
+        try:
+            from .interceptor import LangChainInterceptor
+            interceptor_classes.append(("LangChain", LangChainInterceptor))
+        except Exception:
+            pass
+        
+        # OpenAI SDK (direct openai.ChatCompletion calls)
+        try:
+            from .openai_interceptor import OpenAIInterceptor
+            interceptor_classes.append(("OpenAI", OpenAIInterceptor))
+        except Exception:
+            pass
+        
+        # Anthropic SDK (direct anthropic.messages calls)
+        try:
+            from .anthropic_interceptor import AnthropicInterceptor
+            interceptor_classes.append(("Anthropic", AnthropicInterceptor))
+        except Exception:
+            pass
+        
+        for name, cls in interceptor_classes:
+            try:
+                interceptor = cls(event_callback=self._batcher.add)
+                if interceptor.start():
+                    self._interceptors.append(interceptor)
+                    if debug:
+                        print(f"[AgentCost] {name} interceptor active")
+            except Exception as e:
+                if debug:
+                    print(f"[AgentCost] {name} interceptor skipped: {e}")
+        
+        if self._interceptors:
             self._is_initialized = True
             if debug:
-                print("[AgentCost] Tracking initialized successfully")
+                names = [type(i).__name__.replace('Interceptor', '') for i in self._interceptors]
+                print(f"[AgentCost] Tracking initialized ({', '.join(names)})")
         else:
-            print("[AgentCost] Failed to start interceptor")
+            # Still mark as initialized -- config, batcher, and manual event
+            # submission work fine.  The user just won't get automatic interception.
+            self._is_initialized = True
+            if debug:
+                print("[AgentCost] No auto-interceptable SDK found. "
+                      "Install openai, anthropic, or langchain-core for automatic tracking. "
+                      "Manual event submission via the batcher still works.")
         
         if not self._atexit_registered:
             atexit.register(self.shutdown)
@@ -196,8 +236,9 @@ class AgentCostTracker:
         if not self._is_initialized:
             return
         
-        if self._interceptor:
-            self._interceptor.stop()
+        for interceptor in self._interceptors:
+            interceptor.stop()
+        self._interceptors = []
         
         if self._batcher:
             self._batcher.shutdown()

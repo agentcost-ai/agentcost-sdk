@@ -1,7 +1,8 @@
 """
 AgentCost SDK
 
-Track LLM costs in your LangChain applications with zero code changes.
+Track LLM costs across OpenAI, Anthropic, and LangChain with zero code changes.
+Auto-detects installed SDKs and intercepts all LLM calls transparently.
 
 Usage:
     from agentcost import track_costs
@@ -12,15 +13,33 @@ Usage:
         project_id="your_project_id"
     )
     
-    ## Your LangChain code runs normally - costs are tracked automatically!
+    ## Works with any supported SDK — no code changes needed!
+    
+    # OpenAI
+    from openai import OpenAI
+    client = OpenAI()
+    response = client.chat.completions.create(model="gpt-4o", messages=[...])
+    
+    # Anthropic
+    from anthropic import Anthropic
+    client = Anthropic()
+    message = client.messages.create(model="claude-3-5-sonnet-20241022", ...)
+    
+    # LangChain / LangGraph
     from langchain_openai import ChatOpenAI
     llm = ChatOpenAI(model="gpt-4")
     response = llm.invoke("Hello!")
     
     ## For local testing (no backend required)
     track_costs.init(local_mode=True)
-    # ... run your code ...
-    events = track_costs.get_local_events()  # See all captured events
+    events = track_costs.get_local_events()
+
+Installation:
+    pip install agentcost              # Base (auto-detects installed SDKs)
+    pip install agentcost[openai]      # With OpenAI SDK
+    pip install agentcost[anthropic]   # With Anthropic SDK
+    pip install agentcost[langchain]   # With LangChain
+    pip install agentcost[all]         # All frameworks
 
 For more information, visit: https://agentcost.tech
 """
@@ -68,7 +87,22 @@ from .cost_calculator import (
 )
 from .batcher import HybridBatcher, LocalBatcher
 from .http_client import AgentCostHTTPClient, MockHTTPClient
-from .interceptor import LangChainInterceptor
+
+# Framework interceptors — imported safely since SDKs are optional deps
+try:
+    from .interceptor import LangChainInterceptor
+except Exception:
+    LangChainInterceptor = None  # type: ignore
+
+try:
+    from .openai_interceptor import OpenAIInterceptor
+except Exception:
+    OpenAIInterceptor = None  # type: ignore
+
+try:
+    from .anthropic_interceptor import AnthropicInterceptor
+except Exception:
+    AnthropicInterceptor = None  # type: ignore
 
 __all__ = [
     # Version
@@ -106,4 +140,6 @@ __all__ = [
     "AgentCostHTTPClient",
     "MockHTTPClient",
     "LangChainInterceptor",
+    "OpenAIInterceptor",
+    "AnthropicInterceptor",
 ]
