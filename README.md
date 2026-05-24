@@ -216,9 +216,9 @@ curl -X POST http://localhost:8000/v1/pricing \
   -d '{"gpt-4": {"input": 0.025, "output": 0.05}}'
 ```
 
-## Supported Models (1900+)
+## Supported Models (2000+)
 
-The SDK supports 1900+ models across 45+ providers through dynamic pricing sync with the backend. Models are automatically updated when pricing changes.
+The SDK supports 2000+ models across 45+ providers through dynamic pricing sync with the backend. Models are automatically updated when pricing changes.
 
 | Provider         | Models                                                              |
 | ---------------- | ------------------------------------------------------------------- |
@@ -268,7 +268,7 @@ The SDK supports 1900+ models across 45+ providers through dynamic pricing sync 
 | Weights & Biases | Wandb models                                                        |
 | Zai              | Zai models                                                          |
 
-**Note**: The full list of 1900+ models is dynamically loaded from the backend. Run `track_costs.init()` with a valid API key to access all supported models.
+**Note**: The full list of 2000+ models is dynamically loaded from the backend. Run `track_costs.init()` with a valid API key to access all supported models.
 
 ## Statistics
 
