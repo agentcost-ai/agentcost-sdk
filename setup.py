@@ -24,13 +24,14 @@ setup(
     version=get_version(),
     author="Kushagra Agrawal",
     author_email="kushagraagrawal128@gmail.com",
-    description="Track LLM costs across OpenAI, Anthropic, LangChain, and 2000+ models with zero code changes",
+    description="Track LLM costs across OpenAI, Anthropic, LangChain, and 2900+ models with zero code changes",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/agentcost-ai/agentcost-sdk",
     project_urls={
+        "Homepage": "https://agentcost.tech",
+        "Documentation": "https://agentcost.tech/docs/sdk",
         "Bug Tracker": "https://github.com/agentcost-ai/agentcost-sdk/issues",
-        "Documentation": "https://www.agentcost.tech/docs/sdk",
     },
     license="MIT",
     classifiers=[
