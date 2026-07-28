@@ -1,7 +1,7 @@
 """
 AgentCost SDK
 
-Track LLM costs across OpenAI, Anthropic, and LangChain with zero code changes.
+Track LLM costs across OpenAI, Anthropic, Gemini, and LangChain with zero code changes.
 Auto-detects installed SDKs and intercepts all LLM calls transparently.
 
 Usage:
@@ -24,6 +24,11 @@ Usage:
     from anthropic import Anthropic
     client = Anthropic()
     message = client.messages.create(model="claude-3-5-sonnet-20241022", ...)
+
+    # Gemini (Google Gen AI SDK)
+    from google import genai
+    client = genai.Client()
+    response = client.models.generate_content(model="gemini-2.5-flash", contents="Hello, world!")
     
     # LangChain / LangGraph
     from langchain_openai import ChatOpenAI
@@ -38,6 +43,7 @@ Installation:
     pip install agentcost              # Base (auto-detects installed SDKs)
     pip install agentcost[openai]      # With OpenAI SDK
     pip install agentcost[anthropic]   # With Anthropic SDK
+    pip install agentcost[gemini]      # With Google Gen AI SDK
     pip install agentcost[langchain]   # With LangChain
     pip install agentcost[all]         # All frameworks
 
@@ -104,6 +110,11 @@ try:
 except Exception:
     AnthropicInterceptor = None  # type: ignore
 
+try:
+    from .gemini_interceptor import GeminiInterceptor
+except Exception:
+    GeminiInterceptor = None  # type: ignore
+
 __all__ = [
     # Version
     "__version__",
@@ -142,4 +153,5 @@ __all__ = [
     "LangChainInterceptor",
     "OpenAIInterceptor",
     "AnthropicInterceptor",
+    "GeminiInterceptor",
 ]

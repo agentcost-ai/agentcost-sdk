@@ -51,6 +51,34 @@ def _hash_input(input_text: str) -> str:
     normalized = input_text.lower().strip()
     return hashlib.sha256(normalized.encode()).hexdigest()
 
+
+def _extract_usage_tokens(response: Any, model: str) -> tuple[int, int]:
+    """Prefer provider-reported usage exposed by LangChain over estimation.
+
+    ``ChatGoogleGenerativeAI`` exposes Gemini's authoritative usage as
+    ``usage_metadata``. Other current LangChain integrations use the same
+    shape or place the data under ``response_metadata.token_usage``.
+    """
+    usage = getattr(response, "usage_metadata", None)
+    if not usage:
+        metadata = getattr(response, "response_metadata", None) or {}
+        usage = metadata.get("token_usage") or metadata.get("usage_metadata")
+
+    if usage:
+        def get(*names: str) -> int:
+            for name in names:
+                value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+                if value is not None:
+                    return int(value or 0)
+            return 0
+        return (
+            get("input_tokens", "prompt_tokens", "prompt_token_count"),
+            get("output_tokens", "completion_tokens", "candidates_token_count"),
+        )
+
+    output_text = TokenCounter.extract_text_from_output(response)
+    return 0, TokenCounter.count_tokens(output_text, model)
+
 class LangChainInterceptor:
     """
     Intercepts LangChain LLM calls by monkey patching BaseChatModel.
@@ -190,8 +218,9 @@ class LangChainInterceptor:
                 latency_ms = int((end_time - start_time) * 1000)
                 
                 if response is not None:
-                    output_text = TokenCounter.extract_text_from_output(response)
-                    output_tokens = TokenCounter.count_tokens(output_text, model_name)
+                    reported_input, output_tokens = _extract_usage_tokens(response, model_name)
+                    if reported_input:
+                        input_tokens = reported_input
                 else:
                     output_tokens = 0
                 
@@ -279,8 +308,9 @@ class LangChainInterceptor:
                 latency_ms = int((end_time - start_time) * 1000)
                 
                 if response is not None:
-                    output_text = TokenCounter.extract_text_from_output(response)
-                    output_tokens = TokenCounter.count_tokens(output_text, model_name)
+                    reported_input, output_tokens = _extract_usage_tokens(response, model_name)
+                    if reported_input:
+                        input_tokens = reported_input
                 else:
                     output_tokens = 0
                 
@@ -352,10 +382,13 @@ class LangChainInterceptor:
             input_tokens = TokenCounter.count_tokens(input_text, model_name)
             
             accumulated_content = ""
+            usage_chunk = None
             error_message = None
             
             try:
                 for chunk in original_stream(llm_self, input_data, *args, **kwargs):
+                    if getattr(chunk, "usage_metadata", None) or getattr(chunk, "response_metadata", None):
+                        usage_chunk = chunk
                     if hasattr(chunk, 'content'):
                         accumulated_content += str(chunk.content)
                     elif isinstance(chunk, str):
@@ -369,7 +402,12 @@ class LangChainInterceptor:
             finally:
                 end_time = time.time()
                 latency_ms = int((end_time - start_time) * 1000)
-                output_tokens = TokenCounter.count_tokens(accumulated_content, model_name)
+                if usage_chunk is not None:
+                    reported_input, output_tokens = _extract_usage_tokens(usage_chunk, model_name)
+                    if reported_input:
+                        input_tokens = reported_input
+                else:
+                    output_tokens = TokenCounter.count_tokens(accumulated_content, model_name)
                 cost = calculate_cost(model_name, input_tokens, output_tokens)
                 
                 event = {
@@ -445,10 +483,13 @@ class LangChainInterceptor:
             
             # Accumulate streamed content
             accumulated_content = ""
+            usage_chunk = None
             error_message = None
             
             try:
                 async for chunk in original_astream(llm_self, input_data, *args, **kwargs):
+                    if getattr(chunk, "usage_metadata", None) or getattr(chunk, "response_metadata", None):
+                        usage_chunk = chunk
                     if hasattr(chunk, 'content'):
                         accumulated_content += str(chunk.content)
                     elif isinstance(chunk, str):
@@ -462,7 +503,12 @@ class LangChainInterceptor:
             finally:
                 end_time = time.time()
                 latency_ms = int((end_time - start_time) * 1000)
-                output_tokens = TokenCounter.count_tokens(accumulated_content, model_name)
+                if usage_chunk is not None:
+                    reported_input, output_tokens = _extract_usage_tokens(usage_chunk, model_name)
+                    if reported_input:
+                        input_tokens = reported_input
+                else:
+                    output_tokens = TokenCounter.count_tokens(accumulated_content, model_name)
                 cost = calculate_cost(model_name, input_tokens, output_tokens)
                 
                 event = {

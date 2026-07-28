@@ -199,6 +199,13 @@ class AgentCostTracker:
             interceptor_classes.append(("Anthropic", AnthropicInterceptor))
         except Exception:
             pass
+
+        # Gemini Developer API (direct google-genai calls)
+        try:
+            from .gemini_interceptor import GeminiInterceptor
+            interceptor_classes.append(("Gemini", GeminiInterceptor))
+        except Exception:
+            pass
         
         for name, cls in interceptor_classes:
             try:
@@ -222,7 +229,7 @@ class AgentCostTracker:
             self._is_initialized = True
             if debug:
                 print("[AgentCost] No auto-interceptable SDK found. "
-                      "Install openai, anthropic, or langchain-core for automatic tracking. "
+                      "Install openai, anthropic, google-genai, or langchain-core for automatic tracking. "
                       "Manual event submission via the batcher still works.")
         
         if not self._atexit_registered:

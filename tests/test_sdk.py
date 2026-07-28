@@ -215,8 +215,8 @@ class TestTrackCostsLocalMode:
         from agentcost.config import get_config
         
         with track_costs.agent("test-agent"):
-            config = get_config()
-            assert config.default_agent_name == "test-agent"
+            from agentcost.tracker import _agent_name_var
+            assert _agent_name_var.get() == "test-agent"
         
         track_costs.shutdown()
     
@@ -227,13 +227,14 @@ class TestTrackCostsLocalMode:
         from agentcost.config import get_config
         
         with track_costs.metadata(conversation_id="conv-123", user_id="user-456"):
-            config = get_config()
-            assert config.global_metadata.get("conversation_id") == "conv-123"
-            assert config.global_metadata.get("user_id") == "user-456"
+            from agentcost.tracker import get_effective_metadata
+            metadata = get_effective_metadata()
+            assert metadata.get("conversation_id") == "conv-123"
+            assert metadata.get("user_id") == "user-456"
         
         # Metadata should be cleared after context exits
-        config = get_config()
-        assert "conversation_id" not in config.global_metadata
+        from agentcost.tracker import get_effective_metadata
+        assert "conversation_id" not in get_effective_metadata()
         
         track_costs.shutdown()
 
@@ -342,6 +343,157 @@ class TestNewModelPricing:
         
         assert 'mistral-small' in DEFAULT_PRICING
         assert 'mistral-large' in DEFAULT_PRICING
+
+
+class TestGeminiInterceptor:
+    """Verify direct Google Gen AI SDK usage is captured without network calls."""
+
+    @staticmethod
+    def _response(prompt_tokens=12, output_tokens=8):
+        return Mock(
+            usage_metadata=Mock(
+                prompt_token_count=prompt_tokens,
+                candidates_token_count=output_tokens,
+            )
+        )
+
+    def test_direct_generation_uses_gemini_usage_metadata(self):
+        from agentcost.gemini_interceptor import GeminiInterceptor
+
+        events = []
+        interceptor = GeminiInterceptor(events.append)
+        response = self._response()
+        interceptor._original_generate_content = lambda _client, **_kwargs: response
+
+        wrapped = interceptor._tracked_generate_content()
+        assert wrapped(None, model="gemini-2.0-flash", contents="Hello") is response
+
+        assert len(events) == 1
+        assert events[0]["model"] == "gemini-2.0-flash"
+        assert events[0]["input_tokens"] == 12
+        assert events[0]["output_tokens"] == 8
+        assert events[0]["total_tokens"] == 20
+        assert events[0]["cost"] > 0
+
+    def test_streaming_generation_emits_after_final_usage_chunk(self):
+        from agentcost.gemini_interceptor import GeminiInterceptor
+
+        events = []
+        interceptor = GeminiInterceptor(events.append)
+        chunks = [self._response(0, 0), self._response(15, 9)]
+        interceptor._original_generate_content_stream = lambda _client, **_kwargs: iter(chunks)
+
+        wrapped = interceptor._tracked_generate_content_stream()
+        assert list(wrapped(None, model="gemini-2.0-flash", contents="Hello")) == chunks
+
+        assert len(events) == 1
+        assert events[0]["streaming"] is True
+        assert events[0]["input_tokens"] == 15
+        assert events[0]["output_tokens"] == 9
+
+    def test_breaking_out_of_stream_still_records_and_frees_the_guard(self):
+        """Regression: the recursion guard was held for the whole stream, so a
+        `break` leaked it and permanently disabled tracking for that thread."""
+        from agentcost.gemini_interceptor import GeminiInterceptor, _tracking_depth
+
+        _tracking_depth.value = 0
+        events = []
+        interceptor = GeminiInterceptor(events.append)
+        interceptor._original_generate_content_stream = (
+            lambda _client, **_kwargs: iter([self._response(0, 0), self._response(15, 9)])
+        )
+        interceptor._original_generate_content = lambda _client, **_kwargs: self._response()
+
+        for _chunk in interceptor._tracked_generate_content_stream()(
+            None, model="gemini-2.0-flash", contents="Hello"
+        ):
+            break  # abandon after the first chunk
+
+        assert len(events) == 1, "an abandoned stream must still record the call"
+        assert getattr(_tracking_depth, "value", 0) == 0, "recursion guard leaked"
+
+        # The next ordinary call must still be tracked.
+        interceptor._tracked_generate_content()(None, model="gemini-2.0-flash", contents="next")
+        assert len(events) == 2, "tracking died after an abandoned stream"
+
+    def test_stream_never_iterated_is_still_recorded(self):
+        import gc
+
+        from agentcost.gemini_interceptor import GeminiInterceptor, _tracking_depth
+
+        _tracking_depth.value = 0
+        events = []
+        interceptor = GeminiInterceptor(events.append)
+        interceptor._original_generate_content_stream = (
+            lambda _client, **_kwargs: iter([self._response(11, 4)])
+        )
+
+        stream = interceptor._tracked_generate_content_stream()(
+            None, model="gemini-2.0-flash", contents="Hello"
+        )
+        del stream
+        gc.collect()
+
+        assert len(events) == 1
+        assert getattr(_tracking_depth, "value", 0) == 0
+
+    def test_call_made_during_stream_consumption_is_tracked(self):
+        """The guard must not span consumption, or interleaved calls vanish."""
+        from agentcost.gemini_interceptor import GeminiInterceptor, _tracking_depth
+
+        _tracking_depth.value = 0
+        events = []
+        interceptor = GeminiInterceptor(events.append)
+        interceptor._original_generate_content_stream = (
+            lambda _client, **_kwargs: iter([self._response(0, 0), self._response(15, 9)])
+        )
+        interceptor._original_generate_content = lambda _client, **_kwargs: self._response()
+
+        for _chunk in interceptor._tracked_generate_content_stream()(
+            None, model="gemini-2.0-flash", contents="outer"
+        ):
+            interceptor._tracked_generate_content()(
+                None, model="gemini-2.0-flash", contents="inner"
+            )
+            break
+
+        assert len([e for e in events if not e.get("streaming")]) == 1
+
+    def test_stream_creation_failure_is_recorded(self):
+        from agentcost.gemini_interceptor import GeminiInterceptor
+
+        events = []
+        interceptor = GeminiInterceptor(events.append)
+
+        def fail(_client, **_kwargs):
+            raise RuntimeError("Gemini unavailable")
+
+        interceptor._original_generate_content_stream = fail
+        with pytest.raises(RuntimeError, match="Gemini unavailable"):
+            interceptor._tracked_generate_content_stream()(None, model="gemini-2.0-flash", contents="Hello")
+
+        assert len(events) == 1
+        assert events[0]["success"] is False
+        assert events[0]["streaming"] is True
+
+    @pytest.mark.asyncio
+    async def test_async_generation_uses_gemini_usage_metadata(self):
+        from agentcost.gemini_interceptor import GeminiInterceptor
+
+        events = []
+        interceptor = GeminiInterceptor(events.append)
+        response = self._response(14, 6)
+
+        async def generate(_client, **_kwargs):
+            return response
+
+        interceptor._original_async_generate_content = generate
+        wrapped = interceptor._tracked_async_generate_content()
+        assert await wrapped(None, model="gemini-2.0-flash", contents="Hello") is response
+
+        assert len(events) == 1
+        assert events[0]["input_tokens"] == 14
+        assert events[0]["output_tokens"] == 6
 
 
 class TestCostCalculatorEdgeCases:
