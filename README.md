@@ -1,6 +1,6 @@
 # AgentCost SDK
 
-**Zero-friction LLM cost tracking for OpenAI, Anthropic, and LangChain applications.**
+**Zero-friction LLM cost tracking for OpenAI, Anthropic, Gemini, and LangChain applications.**
 
 ## Installation
 
@@ -33,6 +33,11 @@ from anthropic import Anthropic
 client = Anthropic()
 message = client.messages.create(model="claude-3-5-sonnet-20241022", max_tokens=100, messages=[{"role": "user", "content": "Hello!"}])
 
+# Gemini — automatically tracked (Google Gen AI SDK)
+from google import genai
+client = genai.Client()
+response = client.models.generate_content(model="gemini-2.5-flash", contents="Hello!")
+
 # LangChain — automatically tracked
 from langchain_openai import ChatOpenAI
 llm = ChatOpenAI(model="gpt-4")
@@ -41,9 +46,9 @@ response = llm.invoke("Hello!")
 
 ## Features
 
-- **Zero Code Changes**: Monkey patches OpenAI, Anthropic, and LangChain — your code works as-is
+- **Zero Code Changes**: Monkey patches OpenAI, Anthropic, Gemini, and LangChain — your code works as-is
 - **Automatic Tracking**: Captures all `create()`, `invoke()`, `ainvoke()`, `stream()`, `astream()` calls
-- **Accurate Tokens**: Uses `tiktoken` for precise token counting
+- **Accurate Tokens**: Uses provider-reported usage when available (including Gemini); estimates only when an SDK does not return usage
 - **Real-Time Costs**: Calculates costs using up-to-date model pricing
 - **Batched Sending**: Efficient network usage (size-based + time-based batching)
 - **Rate Limiting**: Built-in rate limiter to protect your backend
@@ -216,15 +221,15 @@ curl -X POST http://localhost:8000/v1/pricing \
   -d '{"gpt-4": {"input": 0.025, "output": 0.05}}'
 ```
 
-## Supported Models (2000+)
+## Supported Models (3500+)
 
-The SDK supports 2000+ models across 45+ providers through dynamic pricing sync with the backend. Models are automatically updated when pricing changes.
+The SDK supports 3500+ models across 45+ providers through dynamic pricing sync with the backend. Models are automatically updated when pricing changes.
 
 | Provider         | Models                                                              |
 | ---------------- | ------------------------------------------------------------------- |
 | OpenAI           | gpt-4, gpt-4-turbo, gpt-4o, gpt-4o-mini, gpt-3.5-turbo, o1, o1-mini |
 | Anthropic        | claude-3-opus/sonnet/haiku, claude-3.5-sonnet/haiku, claude-4-opus  |
-| Google           | gemini-pro, gemini-1.5-pro/flash, gemini-2.0-flash                  |
+| Google           | gemini-pro, gemini-1.5-pro/flash, gemini-2.0-flash/flash-lite, gemini-2.5-pro/flash/flash-lite, gemini-3-pro-preview |
 | Groq             | llama-3.1-8b/70b, llama-3.2-3b, llama-3.3-70b, mixtral-8x7b         |
 | DeepSeek         | deepseek-chat, deepseek-coder, deepseek-reasoner                    |
 | Cohere           | command, command-light, command-r, command-r-plus                   |
@@ -268,7 +273,7 @@ The SDK supports 2000+ models across 45+ providers through dynamic pricing sync 
 | Weights & Biases | Wandb models                                                        |
 | Zai              | Zai models                                                          |
 
-**Note**: The full list of 2000+ models is dynamically loaded from the backend. Run `track_costs.init()` with a valid API key to access all supported models.
+**Note**: The full list of 3500+ models is dynamically loaded from the backend. Run `track_costs.init()` with a valid API key to access all supported models.
 
 ## Statistics
 

@@ -6,7 +6,7 @@ Prices are per 1,000 tokens in USD.
 
 The SDK uses a tiered pricing lookup:
 1. Custom pricing (user-provided)
-2. Dynamic pricing from backend (/v1/pricing, 2000+ models)
+2. Dynamic pricing from backend (/v1/pricing, 3500+ models)
 3. DEFAULT_PRICING fallback (for offline/local mode)
 """
 
@@ -47,11 +47,20 @@ DEFAULT_PRICING: Dict[str, Dict[str, float]] = {
     'mixtral-8x7b-32768': {'input': 0.00024, 'output': 0.00024},
     
     # Google
+    # NOTE: these are the OFFLINE fallback prices used in local_mode and until
+    # the backend pricing sync lands. Any Gemini model missing here is costed
+    # at $0.00, so the current flagship models must stay listed. Values match
+    # the backend's LiteLLM-sourced pricing (per 1K tokens).
     'gemini-pro': {'input': 0.00025, 'output': 0.0005},
     'gemini-1.5-pro': {'input': 0.00125, 'output': 0.005},
     'gemini-1.5-flash': {'input': 0.000075, 'output': 0.0003},
     'gemini-2.0-flash': {'input': 0.0001, 'output': 0.0004},
-    
+    'gemini-2.0-flash-lite': {'input': 0.000075, 'output': 0.0003},
+    'gemini-2.5-pro': {'input': 0.00125, 'output': 0.01},
+    'gemini-2.5-flash': {'input': 0.0003, 'output': 0.0025},
+    'gemini-2.5-flash-lite': {'input': 0.0001, 'output': 0.0004},
+    'gemini-3-pro-preview': {'input': 0.002, 'output': 0.012},
+
     # DeepSeek
     'deepseek-chat': {'input': 0.00014, 'output': 0.00028},
     'deepseek-coder': {'input': 0.00014, 'output': 0.00028},

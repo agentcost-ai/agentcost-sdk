@@ -49,9 +49,8 @@ class TokenCounter:
         if not text:
             return 0
         
-        encoding = cls._get_encoding(model)
-        
         try:
+            encoding = cls._get_encoding(model)
             tokens = encoding.encode(text)
             return len(tokens)
         except Exception as e:
@@ -83,9 +82,8 @@ class TokenCounter:
         if not text:
             return (0, True)
         
-        encoding = cls._get_encoding(model)
-        
         try:
+            encoding = cls._get_encoding(model)
             tokens = encoding.encode(text)
             return (len(tokens), True)
         except Exception:
