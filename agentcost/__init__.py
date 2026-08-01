@@ -50,9 +50,6 @@ Installation:
 For more information, visit: https://agentcost.tech
 """
 
-from pathlib import Path
-
-
 try:
     from importlib.metadata import version, PackageNotFoundError
     __version__ = version("agentcost")

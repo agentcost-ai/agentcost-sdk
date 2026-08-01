@@ -10,10 +10,20 @@ The SDK uses a tiered pricing lookup:
 3. DEFAULT_PRICING fallback (for offline/local mode)
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
-from datetime import datetime
 import threading
+import warnings
+
+
+# Largest batch the API accepts, mirroring the backend's MAX_BATCH_SIZE default
+# (agentcost-backend app/config.py). Anything above this is rejected per-request
+# with a permanent 422, so the SDK clamps rather than posting into a black hole.
+MAX_SERVER_BATCH_SIZE = 100
+
+# Floor for the background flush interval. Below this the flush thread stops
+# being a timer and becomes a busy loop in the host application.
+MIN_FLUSH_INTERVAL = 0.1
 
 
 # Fallback pricing when backend is unreachable.
@@ -106,6 +116,39 @@ class AgentCostConfig:
         if not self.base_url:
             import os
             self.base_url = os.getenv("AGENTCOST_API_URL", "https://api.agentcost.tech")
+
+        # The server rejects any batch larger than its MAX_BATCH_SIZE (default
+        # 100) with a 422, and a 422 is permanent — the batcher re-queues the
+        # same payload forever and nothing is ever recorded. Left unchecked, a
+        # perfectly reasonable batch_size=200 silently produces an empty
+        # dashboard, which is indistinguishable from the SDK not being
+        # installed. Clamp instead, and say so.
+        if self.batch_size > MAX_SERVER_BATCH_SIZE:
+            warnings.warn(
+                f"AgentCost: batch_size={self.batch_size} exceeds the server "
+                f"maximum of {MAX_SERVER_BATCH_SIZE}; using "
+                f"{MAX_SERVER_BATCH_SIZE}. Larger batches are rejected and "
+                f"never recorded.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            self.batch_size = MAX_SERVER_BATCH_SIZE
+        elif self.batch_size < 1:
+            self.batch_size = 1
+
+        # flush_interval drives a sleep in the background flush thread. Zero
+        # turns that thread into a busy loop burning a core inside the host
+        # process; negative raises ValueError out of time.sleep and kills the
+        # thread outright, silently ending all time-based delivery.
+        if self.flush_interval < MIN_FLUSH_INTERVAL:
+            warnings.warn(
+                f"AgentCost: flush_interval={self.flush_interval} is below the "
+                f"minimum of {MIN_FLUSH_INTERVAL}s; using "
+                f"{MIN_FLUSH_INTERVAL}s.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            self.flush_interval = MIN_FLUSH_INTERVAL
     
     custom_pricing: Dict[str, Dict[str, float]] = field(default_factory=dict)
     
@@ -131,24 +174,28 @@ class AgentCostConfig:
         
         if model in DEFAULT_PRICING:
             return DEFAULT_PRICING[model]
-        
-        # Fuzzy match for model variations
-        model_lower = model.lower()
-        for known_model, pricing in DEFAULT_PRICING.items():
-            if known_model in model_lower or model_lower in known_model:
-                return pricing
-        
+
+        # Longest-match, same rule the cost calculator uses. A first-match loop
+        # over an insertion-ordered dict returned 'gpt-4' for 'gpt-4o-mini' and
+        # priced it at 200x. Imported here because cost_calculator imports this
+        # module.
+        from .cost_calculator import _best_substring_match
+
+        match = _best_substring_match(model, DEFAULT_PRICING)
+        if match is not None:
+            return match
+
         if self.debug:
             print(f"[AgentCost] Unknown model '{model}'")
         return {'input': 0.0, 'output': 0.0}
 
 
 # Global config instance (set by tracker.init())
-_config: AgentCostConfig | None = None
+_config: Optional[AgentCostConfig] = None
 _config_lock = threading.Lock()
 
 
-def get_config() -> AgentCostConfig | None:
+def get_config() -> Optional[AgentCostConfig]:
     """Get the current global configuration (thread-safe)"""
     with _config_lock:
         return _config

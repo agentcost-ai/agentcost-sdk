@@ -154,11 +154,20 @@ class AgentCostTracker:
                 api_key=api_key,
                 base_url=resolved_url,
                 debug=debug,
+                timeout=self._config.timeout,
+                max_retries=self._config.max_retries,
             )
         
         def send_callback(events: List[Dict]) -> bool:
             return self._http_client.send_events(project_id, events)
         
+        # Build from the config, not from the raw arguments: __post_init__ is
+        # where batch_size is clamped to what the server will actually accept
+        # and flush_interval is range-checked. Passing the caller's values
+        # straight through here silently discards both.
+        batch_size = self._config.batch_size
+        flush_interval = self._config.flush_interval
+
         if local_mode:
             self._batcher = LocalBatcher(
                 batch_size=batch_size,
