@@ -5,8 +5,9 @@ Handles token counting for different LLM providers using tiktoken.
 """
 
 import logging
+import time
 import tiktoken
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Tuple
 
 # Logger for token counter warnings
 logger = logging.getLogger("agentcost.token_counter")
@@ -24,8 +25,12 @@ class TokenCounter:
         'gpt-4': 'cl100k_base',
         'gpt-4-turbo': 'cl100k_base',
         'gpt-4-turbo-preview': 'cl100k_base',
-        'gpt-4o': 'cl100k_base',
-        'gpt-4o-mini': 'cl100k_base',
+        # The gpt-4o family tokenizes with o200k_base, not cl100k_base. This
+        # exact-match table is consulted before the family-prefix rules in
+        # _get_encoding_name, so leaving these wrong silently overrode the
+        # o200k branch for the two most common model strings a caller passes.
+        'gpt-4o': 'o200k_base',
+        'gpt-4o-mini': 'o200k_base',
         'gpt-3.5-turbo': 'cl100k_base',
         'gpt-3.5-turbo-16k': 'cl100k_base',
         'text-davinci-003': 'p50k_base',
@@ -33,7 +38,16 @@ class TokenCounter:
     }
     
     _encoding_cache: Dict[str, Any] = {}
-    
+
+    # Encoding name -> monotonic deadline before which we will not retry its
+    # load. tiktoken fetches the BPE file over HTTP with no timeout, from the
+    # event loop, so an unreachable CDN otherwise costs that fetch on every
+    # single call. Time-boxed rather than permanent, so one transient failure
+    # does not leave the process estimating characters for its whole lifetime.
+    _load_failed_until: Dict[str, float] = {}
+    _ENCODING_RETRY_SECONDS = 300.0
+
+
     @classmethod
     def count_tokens(cls, text: str, model: str) -> int:
         """
@@ -92,19 +106,49 @@ class TokenCounter:
     @classmethod
     def _get_encoding(cls, model: str):
         """Get or create encoding for model (with caching)"""
-        
+
         cache_key = cls._get_encoding_name(model)
-        if cache_key in cls._encoding_cache:
-            return cls._encoding_cache[cache_key]
-        
+        cached = cls._encoding_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if cls._load_blocked(cache_key):
+            return cls._fallback_encoding()
+
         try:
             encoding = tiktoken.get_encoding(cache_key)
             cls._encoding_cache[cache_key] = encoding
+            cls._load_failed_until.pop(cache_key, None)
             return encoding
         except Exception:
-            if 'cl100k_base' not in cls._encoding_cache:
-                cls._encoding_cache['cl100k_base'] = tiktoken.get_encoding('cl100k_base')
-            return cls._encoding_cache['cl100k_base']
+            cls._load_failed_until[cache_key] = time.monotonic() + cls._ENCODING_RETRY_SECONDS
+            return cls._fallback_encoding()
+
+    @classmethod
+    def _load_blocked(cls, name: str) -> bool:
+        """True while a recently failed encoding is in its cool-off window."""
+        until = cls._load_failed_until.get(name)
+        return until is not None and time.monotonic() < until
+
+    @classmethod
+    def _fallback_encoding(cls):
+        """cl100k_base, negative-cached like any other encoding.
+
+        Raises if it is also unavailable; count_tokens then falls back to
+        character estimation.
+        """
+        cached = cls._encoding_cache.get('cl100k_base')
+        if cached is not None:
+            return cached
+        if cls._load_blocked('cl100k_base'):
+            raise RuntimeError("tiktoken encodings are temporarily unavailable")
+        try:
+            encoding = tiktoken.get_encoding('cl100k_base')
+            cls._encoding_cache['cl100k_base'] = encoding
+            return encoding
+        except Exception:
+            cls._load_failed_until['cl100k_base'] = time.monotonic() + cls._ENCODING_RETRY_SECONDS
+            raise
     
     @classmethod
     def _get_encoding_name(cls, model: str) -> str:
@@ -113,17 +157,20 @@ class TokenCounter:
             return cls.MODEL_ENCODINGS[model]
         
         model_lower = model.lower()
-        if 'gpt-4' in model_lower:
-            return 'cl100k_base'
-        if 'gpt-3.5' in model_lower:
-            return 'cl100k_base'
-        if 'claude' in model_lower:
-            return 'cl100k_base'
-        if 'llama' in model_lower:
-            return 'cl100k_base'
-        if 'mixtral' in model_lower:
-            return 'cl100k_base'
-        
+
+        # o200k_base covers the current OpenAI families. Matched explicitly
+        # because gpt-4o and gpt-4.1 would otherwise reach the cl100k_base
+        # fallback below and be counted with the older, wrong encoding.
+        if any(
+            token in model_lower
+            for token in ('gpt-4o', 'gpt-4.1', 'gpt-5', 'o1', 'o3', 'o4-mini', 'chatgpt-4o')
+        ):
+            return 'o200k_base'
+
+        # Anthropic, Google and open-weight models do not publish a tiktoken
+        # encoding. cl100k_base is an approximation used only when the provider
+        # itself reports no usage — every interceptor prefers the provider's
+        # own counts, so this should rarely be load-bearing.
         return 'cl100k_base'
     
     @classmethod

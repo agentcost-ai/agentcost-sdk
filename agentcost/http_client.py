@@ -8,6 +8,7 @@ Features retry logic, timeouts, rate limiting, and error handling.
 import requests
 import time
 import threading
+import warnings
 from typing import List, Dict, Optional
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -84,6 +85,7 @@ class AgentCostHTTPClient:
         self.timeout = timeout
         self.debug = debug
         self._closed = False
+        self._fatal_reported = False
         
         # Rate limiter (10 requests per second max)
         self._rate_limiter = RateLimiter(max_requests=10, window_seconds=1.0)
@@ -100,7 +102,15 @@ class AgentCostHTTPClient:
             total=max_retries,
             backoff_factor=1,  # Wait 1s, 2s, 4s between retries
             status_forcelist=[429, 500, 502, 503, 504],  # Retry these HTTP codes
-            allowed_methods=["POST", "GET"]  # Updated from deprecated method_whitelist
+            allowed_methods=["POST", "GET"],  # Updated from deprecated method_whitelist
+            # Hand the final response back instead of raising RetryError. The
+            # default (True) raises before requests can attach the response, so
+            # an exhausted 429 lands in the catch-all `except Exception` and is
+            # dropped without ever reaching _report_fatal -- which means a
+            # project that hit its budget cap gets no warning at all. With this
+            # off, raise_for_status() below turns it into an HTTPError that
+            # still carries the response.
+            raise_on_status=False,
         )
         
         # Mount adapter with retry strategy
@@ -176,9 +186,10 @@ class AgentCostHTTPClient:
             return False
         
         except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            text = e.response.text if e.response is not None else str(e)
+            self._report_fatal(status, text)
             if self.debug:
-                status = e.response.status_code if e.response else "unknown"
-                text = e.response.text if e.response else str(e)
                 print(f"[AgentCost] Error: HTTP error: {status} - {text}")
             return False
         
@@ -187,6 +198,34 @@ class AgentCostHTTPClient:
                 print(f"[AgentCost] Error: Unexpected error: {e}")
             return False
     
+    def _report_fatal(self, status: Optional[int], detail: str) -> None:
+        """
+        Warn once about a rejection the caller has to act on, not wait out.
+
+        A bad api_key or project_id otherwise produces zero events and zero
+        output — identical to the SDK not being installed — while the batcher
+        retries the doomed payload every few seconds until it drops it. 429 is
+        listed because the session already exhausted its retries by the time it
+        surfaces here, and a budget cap will not clear on its own.
+        """
+        if self._fatal_reported or status not in (401, 403, 404, 422, 429):
+            return
+        self._fatal_reported = True
+        reason = {
+            401: "the API key was rejected",
+            403: "the API key is not allowed to write to this project",
+            404: "the project was not found",
+            422: "the event payload was rejected as invalid",
+            429: "the server is rate limiting or the project budget cap was reached",
+        }[status]
+        snippet = (detail or "").strip().replace("\n", " ")[:200]
+        warnings.warn(
+            f"AgentCost is not recording events: {reason} (HTTP {status}). "
+            f"Check api_key/project_id in track_costs.init(). Server said: {snippet}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     def test_connection(self) -> bool:
         """Test if backend is reachable"""
         url = f"{self.base_url}/v1/health"
@@ -282,4 +321,3 @@ class MockHTTPClient:
     
     def close(self) -> None:
         """No-op for mock client"""
-        pass

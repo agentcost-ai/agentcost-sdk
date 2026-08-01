@@ -8,8 +8,8 @@ Thread-safe and handles graceful shutdown.
 import threading
 import time
 import atexit
+import warnings
 from typing import List, Dict, Callable, Optional
-from queue import Queue, Empty
 
 
 class HybridBatcher:
@@ -23,7 +23,17 @@ class HybridBatcher:
     - Graceful shutdown (flushes remaining events on exit)
     - Retry queue for failed batches
     """
-    
+
+    # Budget for the delivery attempts shutdown() makes, checked BETWEEN
+    # attempts. It is not a hard wall-clock bound: flush_callback is a blocking
+    # POST that cannot be interrupted once started, so the true worst case is
+    # this budget plus one in-flight attempt, plus the 2s flush-thread join.
+    # Measured ~8-10s against a refusing backend. Without any budget it was
+    # max_retry_batches (100) x the HTTP client's full retry schedule, which is
+    # minutes of apparent hang at interpreter exit.
+    SHUTDOWN_GRACE_SECONDS = 5.0
+
+
     def __init__(
         self,
         batch_size: int = 10,
@@ -54,6 +64,12 @@ class HybridBatcher:
         # Threading control
         self._running = True
         self._flush_thread: Optional[threading.Thread] = None
+        # Handles for the per-batch send threads started by _flush_locked.
+        # Without these, shutdown() has no way to wait for a POST that is
+        # already in flight: those events are in neither _batch nor
+        # _failed_batches, so they are unrecoverable once the interpreter
+        # kills the daemon thread carrying them.
+        self._inflight: List[threading.Thread] = []
         
         # Statistics
         self._stats = {
@@ -104,11 +120,16 @@ class HybridBatcher:
         self._batch = []
         
         # Send in separate thread to avoid blocking
-        threading.Thread(
+        sender = threading.Thread(
             target=self._send_batch,
             args=(events_to_send,),
             daemon=True
-        ).start()
+        )
+        # Retain the handle so shutdown() can wait for it. Drop finished
+        # threads first so a long-lived process does not accumulate them.
+        self._inflight = [t for t in self._inflight if t.is_alive()]
+        self._inflight.append(sender)
+        sender.start()
     
     def _send_batch(self, events: List[Dict]) -> None:
         """
@@ -149,20 +170,32 @@ class HybridBatcher:
             if self.debug:
                 print(f"[AgentCost] Warning: Retry queue full, dropping {len(events)} events")
     
-    def retry_failed_batches(self) -> int:
+    def retry_failed_batches(self, deadline: Optional[float] = None) -> int:
         """
         Retry all failed batches.
-        
+
+        Args:
+            deadline: Optional time.monotonic() value past which no further
+                batch is attempted. Untried batches are returned to the queue
+                so the caller can still account for them. Used at shutdown,
+                where the queue can hold max_retry_batches (100) entries and
+                each unreachable-backend attempt costs the HTTP client its full
+                retry schedule -- minutes of apparent hang at interpreter exit.
+
         Returns:
             Number of batches successfully retried
         """
         with self._lock:
             batches_to_retry = self._failed_batches.copy()
             self._failed_batches = []
-        
+
         success_count = 0
-        
-        for batch in batches_to_retry:
+
+        for position, batch in enumerate(batches_to_retry):
+            if deadline is not None and time.monotonic() >= deadline:
+                with self._lock:
+                    self._failed_batches.extend(batches_to_retry[position:])
+                break
             try:
                 if self.flush_callback(batch):
                     success_count += 1
@@ -195,11 +228,24 @@ class HybridBatcher:
             with self._lock:
                 if self._batch:
                     self._flush_locked()
-            
+                has_failures = bool(self._failed_batches)
+
             # Also try to retry failed batches periodically
-            if self._failed_batches:
+            if has_failures:
                 self.retry_failed_batches()
     
+    def _join_inflight(self, deadline: float) -> None:
+        """Wait for the in-flight send threads, giving up at ``deadline``."""
+        with self._lock:
+            pending = [t for t in self._inflight if t.is_alive()]
+            self._inflight = []
+
+        for thread in pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
+
     def shutdown(self) -> None:
         """
         Graceful shutdown.
@@ -209,24 +255,61 @@ class HybridBatcher:
             return
         
         self._running = False
-        
+
         if self.debug:
             print("[AgentCost] Shutting down batcher...")
-        
+
+        deadline = time.monotonic() + self.SHUTDOWN_GRACE_SECONDS
+
+        # Wait for sends already in flight before looking at what is buffered.
+        # They resolve into either the sent counters or _failed_batches, so
+        # doing this first means the retry pass below sees their failures and
+        # the drop warning reports an accurate count.
+        self._join_inflight(deadline)
+
         # Flush remaining events synchronously (don't use thread)
         with self._lock:
             if self._batch:
                 events = self._batch.copy()
                 self._batch = []
-                
+
                 try:
-                    self.flush_callback(events)
-                    self._stats['events_sent'] += len(events)
-                    self._stats['batches_sent'] += 1
+                    if self.flush_callback(events):
+                        self._stats['events_sent'] += len(events)
+                        self._stats['batches_sent'] += 1
+                    else:
+                        # A rejected final flush is still recoverable below.
+                        self._handle_failed_batch(events)
                 except Exception as e:
                     if self.debug:
                         print(f"[AgentCost] Final flush failed: {e}")
-        
+                    self._handle_failed_batch(events)
+
+        # Anything that failed earlier is still only in memory, and this process
+        # is about to exit — this is the last chance to deliver it.
+        if self._failed_batches:
+            if self.debug:
+                print(f"[AgentCost] Retrying {len(self._failed_batches)} failed batch(es) before exit")
+            self.retry_failed_batches(deadline=deadline)
+            if self._failed_batches:
+                # Unconditional: this is data loss at exit, and staying quiet
+                # about it is what makes "nothing shows in the dashboard"
+                # impossible to diagnose.
+                dropped = sum(len(b) for b in self._failed_batches)
+                try:
+                    warnings.warn(
+                        f"AgentCost dropped {dropped} event(s) that could not be "
+                        f"delivered before shutdown.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                except Exception:
+                    # Raises under -W error, and this runs from atexit, where an
+                    # escaping exception prints an `atexit._run_exitfuncs`
+                    # traceback and can change the process exit status. Losing
+                    # events must not also corrupt the caller's shutdown.
+                    pass
+
         # Wait for flush thread to finish
         if self._flush_thread and self._flush_thread.is_alive():
             self._flush_thread.join(timeout=2)

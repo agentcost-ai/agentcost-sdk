@@ -41,7 +41,6 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
@@ -50,9 +49,15 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     packages=find_packages(),
-    python_requires=">=3.8",
+    # 3.9 is the real floor: PEP 585 builtin generics (list[str], tuple[int,
+    # int]) are used in runtime-evaluated annotations, which 3.8 cannot parse.
+    python_requires=">=3.9",
     install_requires=[
-        "tiktoken>=0.5.0",
+        # 0.7.0 is the first release shipping the o200k_base encoding that
+        # token_counter requests for the gpt-4o / gpt-4.1 / gpt-5 / o-series
+        # families. On older versions that lookup raises and silently falls
+        # back to cl100k_base, undercounting those models.
+        "tiktoken>=0.7.0",
         "requests>=2.28.0",
     ],
     extras_require={

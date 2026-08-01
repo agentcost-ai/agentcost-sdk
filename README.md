@@ -52,7 +52,7 @@ response = llm.invoke("Hello!")
 ## Features
 
 - **Zero Code Changes**: Monkey patches OpenAI, Anthropic, Gemini, and LangChain — your code works as-is
-- **Automatic Tracking**: Captures all `create()`, `invoke()`, `ainvoke()`, `stream()`, `astream()` calls
+- **Automatic Tracking**: Captures `create()` (streaming and not), `parse()`, the OpenAI Responses API, Anthropic's `messages.stream()`, and LangChain `invoke()`/`ainvoke()`/`stream()`/`astream()` — sync and async
 - **Accurate Tokens**: Uses provider-reported usage when available (including Gemini); estimates only when an SDK does not return usage
 - **Real-Time Costs**: Calculates costs using up-to-date model pricing
 - **Batched Sending**: Efficient network usage (size-based + time-based batching)
@@ -226,9 +226,11 @@ curl -X POST http://localhost:8000/v1/pricing \
   -d '{"gpt-4": {"input": 0.025, "output": 0.05}}'
 ```
 
-## Supported Models (3500+)
+## Pricing Coverage (3500+ models)
 
-The SDK supports 3500+ models across 45+ providers through dynamic pricing sync with the backend. Models are automatically updated when pricing changes.
+Costs are priced for 3500+ models across 45+ providers, synced from the backend and updated automatically when pricing changes.
+
+Pricing coverage is not the same as automatic tracking. Calls are intercepted for the four integrations shown in the Quick Start — **OpenAI, Anthropic, Gemini and LangChain** (which also covers LangGraph and CrewAI when they run through LangChain). Calling another provider's SDK directly produces no events; route it through LangChain, or report the usage yourself. The table below is what the SDK can put a price on.
 
 | Provider         | Models                                                              |
 | ---------------- | ------------------------------------------------------------------- |
