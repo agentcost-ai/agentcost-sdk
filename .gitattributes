@@ -1,0 +1,5 @@
+# Normalize text files; pin Python to LF so a Windows checkout cannot
+# flood feature diffs with CRLF churn (see 0.1.6's 360 phantom lines).
+* text=auto
+*.py text eol=lf
+*.md text eol=lf

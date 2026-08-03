@@ -167,6 +167,19 @@ class AgentCostHTTPClient:
             data = response.json()
             
             if data.get('status') == 'ok':
+                # The backend drops malformed events individually and still
+                # returns 200; without this check a fully-rejected batch looked
+                # like a success and the events silently never appeared.
+                rejected = data.get('events_rejected') or 0
+                if rejected:
+                    reasons = data.get('rejected') or []
+                    first = reasons[0].get('reason') if reasons else 'unknown'
+                    warnings.warn(
+                        f"AgentCost: backend rejected {rejected} of "
+                        f"{len(events)} events (first reason: {first}).",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
                 if self.debug:
                     print(f"[AgentCost] Sent {len(events)} events successfully")
                 return True
@@ -176,11 +189,13 @@ class AgentCostHTTPClient:
                 return False
         
         except requests.exceptions.Timeout:
+            self._report_unreachable(f"request timed out after {self.timeout}s")
             if self.debug:
                 print(f"[AgentCost] Error: Request timed out after {self.timeout}s")
             return False
-        
+
         except requests.exceptions.ConnectionError as e:
+            self._report_unreachable(str(e))
             if self.debug:
                 print(f"[AgentCost] Error: Connection error: {e}")
             return False
@@ -198,6 +213,22 @@ class AgentCostHTTPClient:
                 print(f"[AgentCost] Error: Unexpected error: {e}")
             return False
     
+    def _report_unreachable(self, detail: str) -> None:
+        """Warn once when the backend cannot be reached at all.
+
+        Without this, a DNS/firewall/proxy problem was debug-only: zero events,
+        zero output, indistinguishable from the SDK not being installed.
+        """
+        if self._fatal_reported:
+            return
+        self._fatal_reported = True
+        warnings.warn(
+            f"AgentCost cannot reach {self.base_url}: {detail[:200]}. "
+            f"Events are being retried but will be dropped if this persists.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     def _report_fatal(self, status: Optional[int], detail: str) -> None:
         """
         Warn once about a rejection the caller has to act on, not wait out.
