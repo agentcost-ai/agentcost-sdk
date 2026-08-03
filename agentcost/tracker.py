@@ -111,11 +111,23 @@ class AgentCostTracker:
         Returns:
             Self for method chaining
         """
+        if kwargs:
+            # A typo'd kwarg (api_url= instead of base_url=) used to vanish into
+            # **kwargs, leaving the SDK silently pointed at the wrong backend.
+            import warnings
+            warnings.warn(
+                f"AgentCost init() ignoring unknown argument(s): "
+                f"{', '.join(sorted(kwargs))}. "
+                f"Did you mean base_url, api_key, or project_id?",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
         if self._is_initialized:
             if debug:
                 print("[AgentCost] Already initialized, reinitializing...")
             self.shutdown()
-        
+
         self._local_mode = local_mode
         
         # Resolve API URL from parameter, env var, or default
