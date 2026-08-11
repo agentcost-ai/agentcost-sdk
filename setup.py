@@ -48,7 +48,15 @@ setup(
         "Topic :: Software Development :: Libraries :: Python Modules",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
-    packages=find_packages(),
+    # Excluded: find_packages() otherwise ships "tests" to PyPI as a
+    # top-level module, where it collides with any other package doing
+    # the same.
+    packages=find_packages(exclude=["tests", "tests.*"]),
+    entry_points={
+        "console_scripts": [
+            "agentcost=agentcost.cli:main",
+        ],
+    },
     # 3.9 is the real floor: PEP 585 builtin generics (list[str], tuple[int,
     # int]) are used in runtime-evaluated annotations, which 3.8 cannot parse.
     python_requires=">=3.9",

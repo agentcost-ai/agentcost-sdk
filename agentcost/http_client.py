@@ -8,10 +8,29 @@ Features retry logic, timeouts, rate limiting, and error handling.
 import requests
 import time
 import threading
+import logging
 import warnings
 from typing import List, Dict, Optional
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+# warnings.warn() is invisible in most production logging setups; everything
+# user-actionable is reported through both channels so at least one lands.
+logger = logging.getLogger("agentcost")
+
+
+OUTCOME_RECORD = "outcome"
+
+
+def partition_records(records: List[Dict]):
+    """Split a batch into LLM events and run-outcome records."""
+    events, outcomes = [], []
+    for record in records:
+        if record.get("record_type") == OUTCOME_RECORD:
+            outcomes.append({k: v for k, v in record.items() if k != "record_type"})
+        else:
+            events.append(record)
+    return events, outcomes
 
 
 class RateLimiter:
@@ -120,22 +139,22 @@ class AgentCostHTTPClient:
         
         return session
     
-    def send_events(self, project_id: str, events: List[Dict]) -> bool:
+    def send_events(self, project_id: str, records: List[Dict]) -> bool:
         """
-        Send batch of events to backend
-        
+        Send a batch of records to the backend.
+
         Args:
             project_id: User's project ID
-            events: List of event dictionaries
-        
+            records: Event dicts, plus any outcome records the batcher carried
+
         Returns:
             True if successful, False otherwise
         """
         # Apply rate limiting
         self._rate_limiter.wait_and_acquire()
-        
+
         url = f"{self.base_url}/v1/events/batch"
-        
+
         from . import __version__
         headers = {
             'Authorization': f'Bearer {self.api_key}',
@@ -143,12 +162,15 @@ class AgentCostHTTPClient:
             'User-Agent': f'AgentCost-SDK/{__version__}',
             'X-AgentCost-SDK-Version': __version__,
         }
-        
+
+        events, outcomes = partition_records(records)
         payload = {
             'project_id': project_id,
-            'events': events
+            'events': events,
         }
-        
+        if outcomes:
+            payload['outcomes'] = outcomes
+
         if self.debug:
             print(f"[AgentCost] Sending {len(events)} events to {url}")
         
@@ -174,12 +196,12 @@ class AgentCostHTTPClient:
                 if rejected:
                     reasons = data.get('rejected') or []
                     first = reasons[0].get('reason') if reasons else 'unknown'
-                    warnings.warn(
+                    msg = (
                         f"AgentCost: backend rejected {rejected} of "
-                        f"{len(events)} events (first reason: {first}).",
-                        RuntimeWarning,
-                        stacklevel=2,
+                        f"{len(events)} events (first reason: {first})."
                     )
+                    logger.error(msg)
+                    warnings.warn(msg, RuntimeWarning, stacklevel=2)
                 if self.debug:
                     print(f"[AgentCost] Sent {len(events)} events successfully")
                 return True
@@ -222,12 +244,12 @@ class AgentCostHTTPClient:
         if self._fatal_reported:
             return
         self._fatal_reported = True
-        warnings.warn(
+        msg = (
             f"AgentCost cannot reach {self.base_url}: {detail[:200]}. "
-            f"Events are being retried but will be dropped if this persists.",
-            RuntimeWarning,
-            stacklevel=2,
+            f"Events are being retried but will be dropped if this persists."
         )
+        logger.error(msg)
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
     def _report_fatal(self, status: Optional[int], detail: str) -> None:
         """
@@ -250,12 +272,19 @@ class AgentCostHTTPClient:
             429: "the server is rate limiting or the project budget cap was reached",
         }[status]
         snippet = (detail or "").strip().replace("\n", " ")[:200]
-        warnings.warn(
+        hint = ""
+        if status == 403:
+            hint = (
+                " Note: project_id must be the project UUID from "
+                "Settings, not the project name."
+            )
+        msg = (
             f"AgentCost is not recording events: {reason} (HTTP {status}). "
-            f"Check api_key/project_id in track_costs.init(). Server said: {snippet}",
-            RuntimeWarning,
-            stacklevel=2,
+            f"Check api_key/project_id in track_costs.init().{hint} "
+            f"Server said: {snippet}"
         )
+        logger.error(msg)
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
     def test_connection(self) -> bool:
         """Test if backend is reachable"""

@@ -57,6 +57,8 @@ response = llm.invoke("Hello!")
 - **Real-Time Costs**: Calculates costs using up-to-date model pricing
 - **Batched Sending**: Efficient network usage (size-based + time-based batching)
 - **Rate Limiting**: Built-in rate limiter to protect your backend
+- **Workflow Tracing**: Group a multi-step run and get cost per run, per step and per tool
+- **Pre-deployment Analysis**: `agentcost analyze` estimates cost and finds loops before you ship — entirely offline
 - **Local Mode**: Test without a backend
 
 ## Configuration
@@ -103,6 +105,111 @@ with track_costs.agent("technical-agent"):
 
 with track_costs.agent("billing-agent"):
     llm.invoke("What's my balance?")  # Tagged as "billing-agent"
+```
+
+## Workflows & Steps
+
+Agent tagging answers *which agent* spent the money. Wrapping a multi-step run
+answers *what one run costs*, which step dominates it, and whether it loops:
+
+```python
+with track_costs.workflow("support-triage"):
+
+    with track_costs.step("classify"):
+        llm.invoke("Which queue does this belong in?")
+
+    with track_costs.tool("search_docs"):
+        llm.invoke("Summarise these results")
+
+    with track_costs.step("draft_reply"):
+        llm.invoke("Write the response")
+```
+
+Every call inside shares one trace id and records its step, its parent and how
+deeply it was nested. A nested `workflow()` joins the enclosing run rather than
+starting a second one, and `step()` outside a workflow is a no-op — so
+instrumenting a shared helper never depends on how it is called.
+
+Entirely optional and entirely additive: without a `workflow()` your events are
+exactly what they were before.
+
+### Outcomes
+
+Mark how a run ended and you get cost per completed outcome, which charges
+failed runs to the successes they were paid for:
+
+```python
+with track_costs.workflow("support-triage"):
+    ticket = handle(request)
+    track_costs.outcome(ticket.resolved, label=ticket.status)
+```
+
+Sent once per run when the workflow closes, so a late failure overwrites an
+earlier optimistic call.
+
+## Pre-deployment Analysis
+
+Estimate what an agent will cost, and find its loops, before it has spent
+anything. The `agentcost` CLI ships with the package and runs entirely on your
+machine — no network call, and no file content outlives the token count taken
+from it.
+
+```bash
+# What do the prompt and skill files cost on every call?
+agentcost analyze ./agent --model gpt-4o
+```
+
+For a cost-per-run figure, record one representative run in local mode and
+project it to production volume:
+
+```python
+import json
+from agentcost import track_costs
+
+track_costs.init(local_mode=True)
+
+with track_costs.workflow("support-triage"):
+    run_agent(sample_request)
+
+track_costs.flush()
+json.dump(track_costs.get_local_events(), open("run.json", "w"))
+```
+
+```bash
+agentcost analyze ./agent --events run.json --runs-per-day 2000
+```
+
+```
+Prompt and skill files  (gpt-4o)
+  3 file(s), 8,163 tokens, $0.020407 per call just to send them
+
+Test run
+  3 run(s), 4.0 calls per run, $0.044000 per run (worst $0.044000)
+    $  0.022000  50.0%   2.0 calls  search_docs
+    $  0.020000  45.5%   1.0 calls  draft_reply
+    $  0.002000   4.5%   1.0 calls  classify
+
+Projected at 2,000 runs/day: $2,640.00 per month
+
+Findings (3)
+  [  high] Step 'search_docs' ran 2.0 times per run; a loop or retry will multiply this in production
+  [  high] 3 of 3 run(s) made the same call more than once (worst: 2x); the repeats are avoidable
+  [medium] 2 files have identical content; sending both pays twice for the same context
+```
+
+| Flag | Purpose |
+|---|---|
+| `--model` | Model to price against (default `gpt-4o`) |
+| `--events` | Events from a local-mode run (JSON array or JSONL) |
+| `--runs-per-day` | Expected volume, to project a monthly cost |
+| `--pattern` | Glob to include; repeatable (defaults cover prompt and doc files) |
+| `--json` | Also write the full report as JSON |
+| `--fail-on` | Exit non-zero on a finding at or above this severity |
+
+Use `--fail-on high` in CI to block a deploy on a cost regression:
+
+```bash
+agentcost analyze ./agent --events run.json --fail-on high
 ```
 
 ## Metadata
