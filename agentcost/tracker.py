@@ -4,6 +4,8 @@
 
 import atexit
 import os
+import logging
+import uuid
 import contextvars
 from typing import Dict, Any, Optional, List
 from contextlib import contextmanager
@@ -11,6 +13,7 @@ from contextlib import contextmanager
 from .config import AgentCostConfig, set_config, get_config
 from .batcher import HybridBatcher, LocalBatcher
 from .http_client import AgentCostHTTPClient, MockHTTPClient
+from . import trace as trace_context
 
 
 # Default API URL
@@ -22,6 +25,15 @@ def _get_api_url(base_url: Optional[str] = None) -> str:
     if base_url:
         return base_url
     return os.environ.get("AGENTCOST_API_URL", DEFAULT_API_URL)
+
+
+def _looks_like_uuid(value: str) -> bool:
+    """True if value parses as a UUID (the backend's project_id format)."""
+    try:
+        uuid.UUID(value)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 # Thread/async-safe context variable for agent name override
@@ -161,7 +173,21 @@ class AgentCostTracker:
             if not api_key or not project_id:
                 print("[AgentCost] Warning: api_key and project_id required for cloud mode")
                 print("[AgentCost] Use local_mode=True for local testing")
-            
+            elif not _looks_like_uuid(project_id):
+                # The backend matches project_id against the project UUID; a
+                # name like "my-project" 403s on every batch and, before this
+                # check, produced an empty dashboard with no visible error.
+                import warnings
+                msg = (
+                    f"AgentCost: project_id={project_id!r} is not a UUID. "
+                    f"The backend expects the project UUID shown in "
+                    f"Settings -> your project, not the project name. "
+                    f"Events will be rejected with HTTP 403 until this is fixed."
+                )
+                logging.getLogger("agentcost").error(msg)
+                warnings.warn(msg, RuntimeWarning, stacklevel=3)
+
+
             self._http_client = AgentCostHTTPClient(
                 api_key=api_key,
                 base_url=resolved_url,
@@ -230,7 +256,7 @@ class AgentCostTracker:
         
         for name, cls in interceptor_classes:
             try:
-                interceptor = cls(event_callback=self._batcher.add)
+                interceptor = cls(event_callback=self._record_event)
                 if interceptor.start():
                     self._interceptors.append(interceptor)
                     if debug:
@@ -326,6 +352,74 @@ class AgentCostTracker:
         if self._config:
             self._config.global_metadata = {}
     
+    def _record_event(self, event: Dict[str, Any]) -> None:
+        """
+        Single funnel every interceptor's events pass through.
+
+        Stamping here rather than in each interceptor keeps one copy of the
+        rule; it is safe because interceptors invoke this synchronously inside
+        the intercepted call. The exception is a stream consumed after its
+        step() closes, which lands in whatever context iterates it.
+        """
+        try:
+            fields = trace_context.current_trace_fields()
+            if fields:
+                event.update(fields)
+                # Every event is a span, so nested calls have a parent to name.
+                event["span_id"] = trace_context._new_id()
+        except Exception:
+            # Enrichment must never cost the caller an event.
+            pass
+        self._batcher.add(event)
+
+    @contextmanager
+    def workflow(self, name: str, trace_id: Optional[str] = None):
+        """
+        Group the calls of one multi-step run under a single trace.
+
+        Usage:
+            with track_costs.workflow("support-triage"):
+                with track_costs.step("classify"):
+                    llm.invoke("...")
+        """
+        with trace_context.workflow(
+            name, trace_id=trace_id, on_close=self._record_event
+        ) as tid:
+            yield tid
+
+    @contextmanager
+    def step(self, name: str, **extra: Any):
+        """
+        Attribute the calls inside to one named step of the workflow.
+
+        Usage:
+            with track_costs.step("retrieve"):
+                llm.invoke("...")
+        """
+        with trace_context.step(name, **extra) as span_id:
+            yield span_id
+
+    @contextmanager
+    def tool(self, name: str, **extra: Any):
+        """
+        Attribute the calls inside to a named tool invocation.
+
+        Usage:
+            with track_costs.tool("web_search"):
+                results = search(query)
+        """
+        with trace_context.tool(name, **extra) as span_id:
+            yield span_id
+
+    def outcome(self, success: bool, label: Optional[str] = None) -> bool:
+        """
+        Record how the enclosing run ended.
+
+        Sent once when the workflow closes, so a run that later fails can
+        overwrite an earlier optimistic call.
+        """
+        return trace_context.record_outcome(success, label=label)
+
     @contextmanager
     def agent(self, name: str):
         """
@@ -452,3 +546,29 @@ def metadata(**kwargs):
     """Context manager for temporary metadata"""
     with _tracker.metadata(**kwargs):
         yield
+
+
+@contextmanager
+def workflow(name: str, trace_id: Optional[str] = None):
+    """Context manager grouping one multi-step run under a single trace"""
+    with _tracker.workflow(name, trace_id=trace_id) as tid:
+        yield tid
+
+
+def outcome(success: bool, label: Optional[str] = None) -> bool:
+    """Record how the enclosing run ended. No-op outside a workflow()."""
+    return _tracker.outcome(success, label=label)
+
+
+@contextmanager
+def step(name: str, **kwargs):
+    """Context manager attributing enclosed calls to one workflow step"""
+    with _tracker.step(name, **kwargs) as span_id:
+        yield span_id
+
+
+@contextmanager
+def tool(name: str, **kwargs):
+    """Context manager attributing enclosed calls to a tool invocation"""
+    with _tracker.tool(name, **kwargs) as span_id:
+        yield span_id

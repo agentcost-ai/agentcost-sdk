@@ -35,6 +35,14 @@ Usage:
     llm = ChatOpenAI(model="gpt-4")
     response = llm.invoke("Hello!")
     
+    ## Multi-step agents: group a run so cost can be read per workflow,
+    ## per step and per tool, and so repeated work inside one run is visible
+    with track_costs.workflow("support-triage"):
+        with track_costs.step("classify"):
+            llm.invoke("Which queue does this belong in?")
+        with track_costs.tool("search_docs"):
+            llm.invoke("Summarise these results")
+
     ## For local testing (no backend required)
     track_costs.init(local_mode=True)
     events = track_costs.get_local_events()
@@ -73,8 +81,14 @@ from .tracker import (
     session,
     agent,
     metadata,
+    workflow,
+    step,
+    tool,
     AgentCostTracker,
 )
+
+# Trace helpers for reading the active context (advanced usage)
+from .trace import current_trace_id, current_trace_fields
 
 # Expose configuration
 from .config import AgentCostConfig, DEFAULT_PRICING
@@ -130,6 +144,11 @@ __all__ = [
     "session",
     "agent",
     "metadata",
+    "workflow",
+    "step",
+    "tool",
+    "current_trace_id",
+    "current_trace_fields",
     "AgentCostTracker",
     
     # Configuration
