@@ -14,6 +14,7 @@ from functools import wraps
 from typing import Any, Callable, Optional
 
 from .config import get_config
+from .capabilities import CAPABILITY_KEY, fingerprint, merge_config
 from .cost_calculator import calculate_cost
 from ._reentrancy import in_tracking, enter_tracking, exit_tracking
 
@@ -178,7 +179,8 @@ class GeminiInterceptor:
         self.is_active = False
 
     def _emit(self, model: str, agent_name: str, input_hash: str, start_time: float,
-              response: Any = None, error_message: Optional[str] = None, streaming: bool = False) -> None:
+              response: Any = None, error_message: Optional[str] = None, streaming: bool = False,
+              capabilities: Optional[dict] = None) -> None:
         # One guard over the whole body: callers invoke this from a ``finally``
         # block, where an exception would replace the caller's response and
         # skip the exit_tracking() that follows it.
@@ -190,7 +192,9 @@ class GeminiInterceptor:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
-                "cost": calculate_cost(model, input_tokens, output_tokens),
+                "cost": calculate_cost(
+                    model, input_tokens, output_tokens, cached_tokens=cached_tokens
+                ),
                 "latency_ms": int((time.time() - start_time) * 1000),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "success": error_message is None,
@@ -213,6 +217,11 @@ class GeminiInterceptor:
             metadata = get_effective_metadata()
             if metadata:
                 event["metadata"] = metadata
+            if capabilities:
+                # Reserved namespace, merged last so a caller's own metadata
+                # keys can never collide with the capability fingerprint.
+                event.setdefault("metadata", {})
+                event["metadata"][CAPABILITY_KEY] = capabilities
             self.event_callback(event)
         except Exception:
             config = get_config()
@@ -220,13 +229,17 @@ class GeminiInterceptor:
                 import traceback
                 traceback.print_exc()
 
-    def _call_context(self, kwargs: dict) -> tuple[str, str, str, float]:
+    def _call_context(self, kwargs: dict) -> tuple[str, str, str, float, dict]:
         config = get_config()
         return (
             kwargs.get("model", "unknown"),
             _effective_agent_name(config),
             _hash_contents(kwargs.get("contents")),
             time.time(),
+            # google-genai nests tools and response schema under `config`
+            # rather than beside `contents`, so flatten before fingerprinting
+            # or every Gemini call reports no capabilities at all.
+            fingerprint(merge_config(kwargs)),
         )
 
     def _tracked_generate_content(self) -> Callable:
@@ -239,7 +252,7 @@ class GeminiInterceptor:
             if in_tracking():
                 return original(client_self, *args, **kwargs)
             token = enter_tracking()
-            model, agent, input_hash, started = interceptor._call_context(kwargs)
+            model, agent, input_hash, started, caps = interceptor._call_context(kwargs)
             response, error = None, None
             try:
                 response = original(client_self, *args, **kwargs)
@@ -248,7 +261,8 @@ class GeminiInterceptor:
                 error = str(exc)
                 raise
             finally:
-                interceptor._emit(model, agent, input_hash, started, response, error)
+                interceptor._emit(model, agent, input_hash, started, response, error,
+                                  capabilities=caps)
                 exit_tracking(token)
         return wrapped
 
@@ -262,7 +276,7 @@ class GeminiInterceptor:
             if in_tracking():
                 return await original(client_self, *args, **kwargs)
             token = enter_tracking()
-            model, agent, input_hash, started = interceptor._call_context(kwargs)
+            model, agent, input_hash, started, caps = interceptor._call_context(kwargs)
             response, error = None, None
             try:
                 response = await original(client_self, *args, **kwargs)
@@ -271,7 +285,8 @@ class GeminiInterceptor:
                 error = str(exc)
                 raise
             finally:
-                interceptor._emit(model, agent, input_hash, started, response, error)
+                interceptor._emit(model, agent, input_hash, started, response, error,
+                                  capabilities=caps)
                 exit_tracking(token)
         return wrapped
 
@@ -285,11 +300,12 @@ class GeminiInterceptor:
             if in_tracking():
                 return original(client_self, *args, **kwargs)
             token = enter_tracking()
-            model, agent, input_hash, started = interceptor._call_context(kwargs)
+            model, agent, input_hash, started, caps = interceptor._call_context(kwargs)
             try:
                 stream = original(client_self, *args, **kwargs)
             except Exception as exc:
-                interceptor._emit(model, agent, input_hash, started, error_message=str(exc), streaming=True)
+                interceptor._emit(model, agent, input_hash, started, error_message=str(exc),
+                                  streaming=True, capabilities=caps)
                 raise
             finally:
                 # Release the recursion guard as soon as the underlying call
@@ -299,7 +315,8 @@ class GeminiInterceptor:
                 # other LLM call made mid-iteration was skipped.
                 exit_tracking(token)
             return _GeminiStream(stream, lambda response, error=None: interceptor._emit(
-                model, agent, input_hash, started, response, error, streaming=True))
+                model, agent, input_hash, started, response, error, streaming=True,
+                capabilities=caps))
         return wrapped
 
     def _tracked_async_generate_content_stream(self) -> Callable:
@@ -312,17 +329,19 @@ class GeminiInterceptor:
             if in_tracking():
                 return await original(client_self, *args, **kwargs)
             token = enter_tracking()
-            model, agent, input_hash, started = interceptor._call_context(kwargs)
+            model, agent, input_hash, started, caps = interceptor._call_context(kwargs)
             try:
                 stream = await original(client_self, *args, **kwargs)
             except Exception as exc:
-                interceptor._emit(model, agent, input_hash, started, error_message=str(exc), streaming=True)
+                interceptor._emit(model, agent, input_hash, started, error_message=str(exc),
+                                  streaming=True, capabilities=caps)
                 raise
             finally:
                 # See the sync variant: the guard must not span consumption.
                 exit_tracking(token)
             return _GeminiAsyncStream(stream, lambda response, error=None: interceptor._emit(
-                model, agent, input_hash, started, response, error, streaming=True))
+                model, agent, input_hash, started, response, error, streaming=True,
+                capabilities=caps))
         return wrapped
 
 

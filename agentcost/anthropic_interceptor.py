@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 from .cost_calculator import calculate_cost
 from .config import get_config
+from .capabilities import CAPABILITY_KEY, fingerprint
 from ._reentrancy import in_tracking, enter_tracking, exit_tracking
 
 
@@ -86,13 +87,29 @@ def _get_effective_agent_name(config, explicit: Optional[str] = None) -> str:
 
 
 def _usage_from(obj) -> tuple:
-    """Read (input_tokens, output_tokens) off anything carrying a usage block."""
+    """Read (input, output, cache_read, cache_write) off a usage block.
+
+    Anthropic reports the two cache counts *alongside* input_tokens rather than
+    inside it -- ``input_tokens`` is only the uncached remainder. That is the
+    opposite of OpenAI, where cached tokens are a subset of the prompt count.
+    Both are normalised here to the subset convention the backend expects:
+    input_tokens is the whole prompt, cached_tokens is the part of it that was
+    read from cache. Cache *writes* stay separate because they are billed at a
+    premium over standard input, not a discount.
+    """
     usage = getattr(obj, "usage", None)
     if not usage:
-        return 0, 0
+        return 0, 0, 0, 0
+
+    uncached = getattr(usage, "input_tokens", 0) or 0
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+
     return (
-        getattr(usage, "input_tokens", 0) or 0,
+        uncached + cache_read,
         getattr(usage, "output_tokens", 0) or 0,
+        cache_read,
+        cache_write,
     )
 
 
@@ -219,9 +236,18 @@ class AnthropicInterceptor:
         input_hash: str,
         error_message: Optional[str] = None,
         streaming: bool = False,
+        cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        capabilities: Optional[dict] = None,
     ) -> dict:
         """Build a standardized event dict."""
-        cost = calculate_cost(model, input_tokens, output_tokens)
+        cost = calculate_cost(
+            model,
+            input_tokens,
+            output_tokens,
+            cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
+        )
         event = {
             "agent_name": agent_name,
             "model": model,
@@ -237,6 +263,10 @@ class AnthropicInterceptor:
         }
         if streaming:
             event["streaming"] = True
+        if cached_tokens:
+            event["cached_tokens"] = cached_tokens
+        if cache_write_tokens:
+            event["cache_write_tokens"] = cache_write_tokens
 
         try:
             from .tracker import get_effective_metadata
@@ -245,6 +275,12 @@ class AnthropicInterceptor:
                 event["metadata"] = meta
         except ImportError:
             pass
+
+        if capabilities:
+            # Reserved namespace, merged after user metadata so a caller's own
+            # keys can never collide with the capability fingerprint.
+            event.setdefault("metadata", {})
+            event["metadata"][CAPABILITY_KEY] = capabilities
 
         return event
 
@@ -264,6 +300,7 @@ class AnthropicInterceptor:
         start_time: float,
         error_message: Optional[str] = None,
         streaming: bool = False,
+        capabilities: Optional[dict] = None,
     ) -> None:
         """Build and emit the event for a finished call.
 
@@ -272,11 +309,13 @@ class AnthropicInterceptor:
         response and skip the exit_tracking() that follows it.
         """
         try:
-            input_tokens, output_tokens = _usage_from(response)
+            input_tokens, output_tokens, cached, cache_write = _usage_from(response)
             self._emit(self._build_event(
                 model, agent_name, input_tokens, output_tokens,
                 int((time.time() - start_time) * 1000),
                 input_hash, error_message, streaming=streaming,
+                cached_tokens=cached, cache_write_tokens=cache_write,
+                capabilities=capabilities,
             ))
         except Exception:
             self._on_tracking_error()
@@ -310,6 +349,7 @@ class AnthropicInterceptor:
             agent_name = _get_effective_agent_name(config)
             input_text = _request_text(kwargs)
             input_hash = _hash_input(input_text)
+            caps = fingerprint(kwargs)
 
             start_time = time.time()
             error_message = None
@@ -325,7 +365,7 @@ class AnthropicInterceptor:
                     deferred = True
                     return _AnthropicRawStreamWrapper(
                         response, model, agent_name, input_hash,
-                        start_time, interceptor,
+                        start_time, interceptor, capabilities=caps,
                     )
 
                 return response
@@ -338,7 +378,7 @@ class AnthropicInterceptor:
                 if not deferred:
                     interceptor._record_call(
                         response, model, agent_name, input_hash,
-                        start_time, error_message,
+                        start_time, error_message, capabilities=caps,
                     )
                 exit_tracking(token)
 
@@ -364,13 +404,14 @@ class AnthropicInterceptor:
             agent_name = _get_effective_agent_name(config)
             input_text = _request_text(kwargs)
             input_hash = _hash_input(input_text)
+            caps = fingerprint(kwargs)
 
             start_time = time.time()
             stream_manager = original(client_self, *args, **kwargs)
 
             return _AnthropicStreamManagerWrapper(
                 stream_manager, model, agent_name, input_hash,
-                start_time, interceptor,
+                start_time, interceptor, capabilities=caps,
             )
 
         return tracked_stream
@@ -396,6 +437,7 @@ class AnthropicInterceptor:
             agent_name = _get_effective_agent_name(config)
             input_text = _request_text(kwargs)
             input_hash = _hash_input(input_text)
+            caps = fingerprint(kwargs)
 
             start_time = time.time()
             error_message = None
@@ -409,7 +451,7 @@ class AnthropicInterceptor:
                     deferred = True
                     return _AnthropicAsyncRawStreamWrapper(
                         response, model, agent_name, input_hash,
-                        start_time, interceptor,
+                        start_time, interceptor, capabilities=caps,
                     )
 
                 return response
@@ -422,7 +464,7 @@ class AnthropicInterceptor:
                 if not deferred:
                     interceptor._record_call(
                         response, model, agent_name, input_hash,
-                        start_time, error_message,
+                        start_time, error_message, capabilities=caps,
                     )
                 exit_tracking(token)
 
@@ -451,13 +493,14 @@ class AnthropicInterceptor:
             agent_name = _get_effective_agent_name(config)
             input_text = _request_text(kwargs)
             input_hash = _hash_input(input_text)
+            caps = fingerprint(kwargs)
 
             start_time = time.time()
             stream_manager = original(client_self, *args, **kwargs)
 
             return _AnthropicAsyncStreamManagerWrapper(
                 stream_manager, model, agent_name, input_hash,
-                start_time, interceptor,
+                start_time, interceptor, capabilities=caps,
             )
 
         return tracked_async_stream
@@ -469,15 +512,19 @@ class AnthropicInterceptor:
 class _StreamEventUsageMixin:
     """Accumulates usage from raw server-sent events."""
 
-    def __init__(self, stream, model, agent_name, input_hash, start_time, interceptor):
+    def __init__(self, stream, model, agent_name, input_hash, start_time,
+                 interceptor, capabilities=None):
         self._stream = stream
         self._model = model
         self._agent_name = agent_name
         self._input_hash = input_hash
         self._start_time = start_time
         self._interceptor = interceptor
+        self._capabilities = capabilities
         self._input_tokens = 0
         self._output_tokens = 0
+        self._cached_tokens = 0
+        self._cache_write_tokens = 0
         self._emitted = False
 
     def __getattr__(self, name):
@@ -496,6 +543,9 @@ class _StreamEventUsageMixin:
                 self._input_tokens, self._output_tokens,
                 int((time.time() - self._start_time) * 1000),
                 self._input_hash, error_message, streaming=True,
+                cached_tokens=self._cached_tokens,
+                cache_write_tokens=self._cache_write_tokens,
+                capabilities=self._capabilities,
             ))
         except Exception:
             self._interceptor._on_tracking_error()
@@ -505,14 +555,16 @@ class _StreamEventUsageMixin:
         if etype == "message_start":
             message = getattr(event, "message", None)
             if message is not None:
-                self._input_tokens, out = _usage_from(message)
+                self._input_tokens, out, cached, written = _usage_from(message)
+                self._cached_tokens = cached
+                self._cache_write_tokens = written
                 # message_start carries a partial output count; keep it as a
                 # floor in case no message_delta arrives.
                 self._output_tokens = max(self._output_tokens, out)
                 # The resolved model beats the alias the caller passed in.
                 self._model = getattr(message, "model", None) or self._model
         elif etype == "message_delta":
-            _, out = _usage_from(event)
+            _, out, _cached, _written = _usage_from(event)
             if out:
                 self._output_tokens = out
 
@@ -599,10 +651,12 @@ class _SnapshotUsageMixin:
             snapshot = getattr(self._entered_stream, "current_message_snapshot", None)
             if snapshot is None:
                 return
-            input_tokens, output_tokens = _usage_from(snapshot)
+            input_tokens, output_tokens, cached, written = _usage_from(snapshot)
             if input_tokens or output_tokens:
                 self._input_tokens = input_tokens
                 self._output_tokens = output_tokens
+                self._cached_tokens = cached
+                self._cache_write_tokens = written
             self._model = getattr(snapshot, "model", None) or self._model
         except Exception:
             # Never let bookkeeping break the caller's stream.
@@ -620,6 +674,9 @@ class _SnapshotUsageMixin:
                 self._input_tokens, self._output_tokens,
                 int((time.time() - self._start_time) * 1000),
                 self._input_hash, error_message, streaming=True,
+                cached_tokens=self._cached_tokens,
+                cache_write_tokens=self._cache_write_tokens,
+                capabilities=getattr(self, "_capabilities", None),
             ))
         except Exception:
             self._interceptor._on_tracking_error()
@@ -628,15 +685,19 @@ class _SnapshotUsageMixin:
 class _AnthropicStreamManagerWrapper(_SnapshotUsageMixin):
     """Wraps Anthropic's MessageStreamManager to capture metrics."""
 
-    def __init__(self, stream_manager, model, agent_name, input_hash, start_time, interceptor):
+    def __init__(self, stream_manager, model, agent_name, input_hash, start_time,
+                 interceptor, capabilities=None):
         self._stream_manager = stream_manager
         self._model = model
         self._agent_name = agent_name
         self._input_hash = input_hash
         self._start_time = start_time
         self._interceptor = interceptor
+        self._capabilities = capabilities
         self._input_tokens = 0
         self._output_tokens = 0
+        self._cached_tokens = 0
+        self._cache_write_tokens = 0
         self._entered_stream = None
         self._emitted = False
 
@@ -659,15 +720,19 @@ class _AnthropicStreamManagerWrapper(_SnapshotUsageMixin):
 class _AnthropicAsyncStreamManagerWrapper(_SnapshotUsageMixin):
     """Wraps Anthropic's AsyncMessageStreamManager to capture metrics."""
 
-    def __init__(self, stream_manager, model, agent_name, input_hash, start_time, interceptor):
+    def __init__(self, stream_manager, model, agent_name, input_hash, start_time,
+                 interceptor, capabilities=None):
         self._stream_manager = stream_manager
         self._model = model
         self._agent_name = agent_name
         self._input_hash = input_hash
         self._start_time = start_time
         self._interceptor = interceptor
+        self._capabilities = capabilities
         self._input_tokens = 0
         self._output_tokens = 0
+        self._cached_tokens = 0
+        self._cache_write_tokens = 0
         self._entered_stream = None
         self._emitted = False
 
