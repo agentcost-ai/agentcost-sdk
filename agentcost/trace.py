@@ -13,15 +13,57 @@ threads keep their own trace with nothing threaded through call signatures.
 """
 
 import contextvars
+import os
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
+# A run identifier minted by whatever launched this process. An external
+# control plane that wraps the agent -- a policy layer, an orchestrator, a CI
+# job -- can correlate its own records with these events by exporting one
+# variable, with no code change on either side.
+TRACE_ID_ENV = "AGENTCOST_TRACE_ID"
+WORKFLOW_ENV = "AGENTCOST_WORKFLOW"
+
+# Matches events.trace_id in the backend schema. A longer id is truncated
+# rather than rejected, because silently dropping every event of a run is a
+# far worse failure than a shortened key that still joins consistently.
+MAX_TRACE_ID = 64
+
 
 def _new_id() -> str:
     """Short, collision-safe id. 16 hex chars is plenty inside one project."""
     return uuid.uuid4().hex[:16]
+
+
+def _inherited_trace_id() -> Optional[str]:
+    """A run id exported into this process, or None."""
+    value = (os.environ.get(TRACE_ID_ENV) or "").strip()
+    return value[:MAX_TRACE_ID] if value else None
+
+
+def inherited_workflow_name() -> Optional[str]:
+    """A workflow name exported into this process, or None."""
+    value = (os.environ.get(WORKFLOW_ENV) or "").strip()
+    return value[:255] if value else None
+
+
+def environment_trace_fields() -> Dict[str, Any]:
+    """Trace fields inherited from the environment, for calls outside workflow().
+
+    This is what lets a wrapping process correlate an uninstrumented agent's
+    events by exporting AGENTCOST_TRACE_ID / AGENTCOST_WORKFLOW alone. An
+    active workflow() always takes precedence over these.
+    """
+    fields: Dict[str, Any] = {}
+    trace_id = _inherited_trace_id()
+    if trace_id:
+        fields["trace_id"] = trace_id
+    workflow_name = inherited_workflow_name()
+    if workflow_name:
+        fields["workflow"] = workflow_name
+    return fields
 
 
 @dataclass
@@ -117,13 +159,19 @@ def workflow(
     Pass ``trace_id`` to join a trace minted in another process. ``on_close``
     receives the outcome record, if one was declared, and fires only on the
     frame that owns the trace.
+
+    With no explicit id, ``AGENTCOST_TRACE_ID`` from the environment is used
+    if set. That is what lets a wrapping process -- a policy layer, an
+    orchestrator -- correlate its records with these events without the agent
+    author writing any integration code. An explicit argument always wins.
     """
     existing = _trace_var.get(None)
     if existing is not None:
         yield existing.trace_id
         return
 
-    trace = _Trace(trace_id=trace_id or _new_id(), workflow=name)
+    resolved = trace_id or _inherited_trace_id() or _new_id()
+    trace = _Trace(trace_id=resolved[:MAX_TRACE_ID], workflow=name)
     token = _trace_var.set(trace)
     try:
         yield trace.trace_id

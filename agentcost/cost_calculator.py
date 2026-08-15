@@ -97,6 +97,11 @@ class DynamicPricingManager:
                     new_cache[model] = {
                         'input': prices.get('input', 0.0),
                         'output': prices.get('output', 0.0),
+                        # Left as None when the backend has no cache rate for
+                        # this model; calculate_cost() then bills cached tokens
+                        # at the standard input rate rather than free.
+                        'cached_input': prices.get('cached_input'),
+                        'cache_write': prices.get('cache_write'),
                     }
                 
                 with self._lock:
@@ -198,6 +203,25 @@ def _best_substring_match(model: str, table: Dict[str, Dict[str, float]]):
 _warned_bad_pricing = set()
 
 
+def _optional_rate(pricing, key: str):
+    """A rate that may legitimately be absent, or None.
+
+    Distinct from _rate: a missing cache rate means "this model has no cache
+    pricing, bill at the standard rate", not "this side is free". Returning
+    0.0 here would silently zero out real spend.
+    """
+    try:
+        value = pricing[key]
+    except (KeyError, TypeError):
+        return None
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _rate(pricing, key: str, model: str) -> float:
     """One side of a model's price, or 0.0 if the entry is unusable."""
     try:
@@ -229,21 +253,30 @@ class CostCalculator:
         self.custom_pricing = custom_pricing or {}
     
     def calculate_cost(
-        self, 
-        model: str, 
-        input_tokens: int, 
-        output_tokens: int
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
     ) -> float:
         """
         Calculate cost in USD
-        
+
         Args:
             model: Model name (e.g., 'gpt-4')
-            input_tokens: Number of input tokens
+            input_tokens: Total prompt tokens, cached ones included
             output_tokens: Number of output tokens
-        
+            cached_tokens: Portion of input_tokens served from the prompt cache,
+                billed at the cache-read rate where the provider publishes one
+            cache_write_tokens: Tokens written to the cache, billed at a premium
+
         Returns:
             Cost in USD (e.g., 0.00453)
+
+        This figure is a client-side estimate. The backend reprices every event
+        against its own catalogue and overrides it, so a stale or missing cache
+        rate here is corrected server-side rather than persisted.
         """
         pricing = self._get_model_pricing(model)
 
@@ -251,10 +284,28 @@ class CostCalculator:
         # so a missing or non-numeric rate must degrade to 0.0 rather than raise:
         # this runs inside the interceptors' finally blocks, where an exception
         # would cost the caller their response and the event its record.
-        input_cost = (input_tokens / 1000) * _rate(pricing, 'input', model)
-        output_cost = (output_tokens / 1000) * _rate(pricing, 'output', model)
+        input_rate = _rate(pricing, 'input', model)
+        output_rate = _rate(pricing, 'output', model)
 
-        return round(input_cost + output_cost, 8)
+        # Absent cache rates fall back to the standard input rate. Never assume
+        # a discount that the provider has not published.
+        cached_rate = _optional_rate(pricing, 'cached_input')
+        if cached_rate is None:
+            cached_rate = input_rate
+        write_rate = _optional_rate(pricing, 'cache_write')
+        if write_rate is None:
+            write_rate = input_rate
+
+        cached = max(0, min(cached_tokens or 0, input_tokens))
+        uncached = input_tokens - cached
+
+        total = (
+            (uncached / 1000) * input_rate
+            + (cached / 1000) * cached_rate
+            + (max(0, cache_write_tokens or 0) / 1000) * write_rate
+            + (output_tokens / 1000) * output_rate
+        )
+        return round(total, 8)
     
     def _get_model_pricing(self, model: str) -> Dict[str, float]:
         """Get pricing for model, with fallback logic"""
@@ -369,9 +420,21 @@ def get_calculator() -> CostCalculator:
     return _calculator
 
 
-def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+def calculate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> float:
     """Convenience function to calculate cost"""
-    return get_calculator().calculate_cost(model, input_tokens, output_tokens)
+    return get_calculator().calculate_cost(
+        model,
+        input_tokens,
+        output_tokens,
+        cached_tokens=cached_tokens,
+        cache_write_tokens=cache_write_tokens,
+    )
 
 
 def refresh_pricing() -> None:

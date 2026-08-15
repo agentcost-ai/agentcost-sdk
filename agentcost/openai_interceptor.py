@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from .cost_calculator import calculate_cost
 from .config import get_config
+from .capabilities import CAPABILITY_KEY, fingerprint
 # Guard preventing double-counting when LangChain (or another higher-level
 # interceptor) calls OpenAI under the hood. Shared by every interceptor — see
 # _reentrancy.py for why it is a ContextVar and not a thread-local.
@@ -222,9 +223,12 @@ class OpenAIInterceptor:
         error_message: Optional[str] = None,
         streaming: bool = False,
         cached_tokens: int = 0,
+        capabilities: Optional[dict] = None,
     ) -> dict:
         """Build a standardized event dict."""
-        cost = calculate_cost(model, input_tokens, output_tokens)
+        cost = calculate_cost(
+            model, input_tokens, output_tokens, cached_tokens=cached_tokens
+        )
         event = {
             "agent_name": agent_name,
             "model": model,
@@ -251,6 +255,12 @@ class OpenAIInterceptor:
         except ImportError:
             pass
 
+        if capabilities:
+            # Reserved namespace, merged after user metadata so a caller's own
+            # keys can never collide with the capability fingerprint.
+            event.setdefault("metadata", {})
+            event["metadata"][CAPABILITY_KEY] = capabilities
+
         return event
 
     def _emit(self, event: dict) -> None:
@@ -268,6 +278,7 @@ class OpenAIInterceptor:
         input_hash: str,
         start_time: float,
         error_message: Optional[str] = None,
+        capabilities: Optional[dict] = None,
     ) -> None:
         """Build and emit the event for a finished non-streaming call.
 
@@ -283,6 +294,7 @@ class OpenAIInterceptor:
                 int((time.time() - start_time) * 1000),
                 input_hash, error_message,
                 cached_tokens=_cached_input_tokens(usage),
+                capabilities=capabilities,
             ))
         except Exception:
             self._on_tracking_error()
@@ -356,6 +368,7 @@ class OpenAIInterceptor:
             is_stream = kwargs.get("stream", False)
             agent_name = _get_effective_agent_name(config)
             input_hash = _hash_input(_extract_input_text(kwargs))
+            caps = fingerprint(kwargs)
             injected_usage = interceptor._prepare_stream_usage(kwargs)
 
             start_time = time.time()
@@ -380,6 +393,7 @@ class OpenAIInterceptor:
                     return _SyncStreamWrapper(
                         response, model, agent_name, input_hash, start_time,
                         interceptor, hide_usage_chunk=injected_usage,
+                        capabilities=caps,
                     )
 
                 return response
@@ -394,7 +408,7 @@ class OpenAIInterceptor:
                 if not is_stream or error_message is not None:
                     interceptor._record_call(
                         response, model, agent_name, input_hash,
-                        start_time, error_message,
+                        start_time, error_message, capabilities=caps,
                     )
                 exit_tracking(token)
 
@@ -421,6 +435,7 @@ class OpenAIInterceptor:
             is_stream = kwargs.get("stream", False)
             agent_name = _get_effective_agent_name(config)
             input_hash = _hash_input(_extract_input_text(kwargs))
+            caps = fingerprint(kwargs)
             injected_usage = interceptor._prepare_stream_usage(kwargs)
 
             start_time = time.time()
@@ -443,6 +458,7 @@ class OpenAIInterceptor:
                     return _AsyncStreamWrapper(
                         response, model, agent_name, input_hash, start_time,
                         interceptor, hide_usage_chunk=injected_usage,
+                        capabilities=caps,
                     )
 
                 return response
@@ -456,7 +472,7 @@ class OpenAIInterceptor:
                 if not is_stream or error_message is not None:
                     interceptor._record_call(
                         response, model, agent_name, input_hash,
-                        start_time, error_message,
+                        start_time, error_message, capabilities=caps,
                     )
                 exit_tracking(token)
 
@@ -470,13 +486,14 @@ class _StreamUsageMixin:
     """Bookkeeping shared by the sync and async Stream wrappers."""
 
     def __init__(self, stream, model, agent_name, input_hash, start_time,
-                 interceptor, hide_usage_chunk=False):
+                 interceptor, hide_usage_chunk=False, capabilities=None):
         self._stream = stream
         self._model = model
         self._agent_name = agent_name
         self._input_hash = input_hash
         self._start_time = start_time
         self._interceptor = interceptor
+        self._capabilities = capabilities
         self._output_tokens = 0
         self._input_tokens = 0
         self._cached_tokens = 0
@@ -542,6 +559,7 @@ class _StreamUsageMixin:
             self._input_tokens, self._output_tokens,
             latency_ms, self._input_hash, error_message,
             streaming=True, cached_tokens=self._cached_tokens,
+            capabilities=self._capabilities,
         )
         self._interceptor._emit(event)
 
