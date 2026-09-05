@@ -363,17 +363,20 @@ class AgentCostTracker:
         """
         try:
             fields = trace_context.current_trace_fields()
-            if fields:
+            if "trace_id" in fields:
                 event.update(fields)
                 # Every event is a span, so nested calls have a parent to name.
                 event["span_id"] = trace_context._new_id()
             else:
                 # Outside workflow(), a run id exported by a wrapping process
                 # still correlates the event. No span ids: the run has no
-                # declared structure, only membership.
+                # declared structure, only membership. A bare tool() still
+                # names the tool.
                 inherited = trace_context.environment_trace_fields()
                 if inherited:
                     event.update(inherited)
+                if fields:
+                    event.update(fields)
         except Exception:
             # Enrichment must never cost the caller an event.
             pass

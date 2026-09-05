@@ -114,9 +114,17 @@ _span_var: contextvars.ContextVar[Optional[_Span]] = contextvars.ContextVar(
 
 
 def current_trace_fields() -> Dict[str, Any]:
-    """Trace columns for an event created now; empty outside a workflow()."""
+    """Trace columns for an event created now.
+
+    Empty outside a workflow(), except that a bare tool() still contributes
+    ``tool_name``: a tool boundary is meaningful (guardrails judge it) even
+    when the run has no declared structure around it.
+    """
     trace = _trace_var.get(None)
     if trace is None:
+        span = _span_var.get(None)
+        if span is not None and span.tool_name:
+            return {"tool_name": span.tool_name}
         return {}
 
     fields: Dict[str, Any] = {
@@ -226,25 +234,25 @@ def tool(name: str, **extra: Any):
 
     Like step(), but marks the span with a tool name so calls made underneath
     are attributable to the tool.
+
+    Unlike step(), it also works outside a workflow(): the calls carry only
+    ``tool_name`` then (no trace or span ids), which is enough for guardrail
+    compliance to see the tool boundary.
     """
     trace = _trace_var.get(None)
-    if trace is None:
-        yield None
-        return
-
     parent = _span_var.get(None)
     span = _Span(
         span_id=_new_id(),
         name=name,
         parent_span_id=parent.span_id if parent else None,
-        step_index=trace.take_index(),
+        step_index=trace.take_index() if trace is not None else 0,
         depth=(parent.depth + 1) if parent else 0,
         tool_name=name,
         extra=extra,
     )
     token = _span_var.set(span)
     try:
-        yield span.span_id
+        yield span.span_id if trace is not None else None
     finally:
         _span_var.reset(token)
 

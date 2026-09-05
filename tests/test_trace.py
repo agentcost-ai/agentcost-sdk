@@ -97,6 +97,21 @@ class TestTraceContext:
         assert event["tool_name"] == "web_search"
         assert event["step_name"] == "web_search"
 
+    def test_tool_outside_a_workflow_still_names_the_tool(self, tracker):
+        """Guardrails judge tool boundaries, so a bare tool() must be visible
+        even when nothing declared a run around it."""
+        with track_costs.tool("send_email"):
+            tracker._record_event({"model": "m"})
+        event = _events()[0]
+        assert event["tool_name"] == "send_email"
+        assert "trace_id" not in event
+        assert "span_id" not in event
+        assert "step_name" not in event
+
+    def test_tool_outside_a_workflow_yields_no_span_id(self, tracker):
+        with track_costs.tool("send_email") as span_id:
+            assert span_id is None
+
     def test_llm_call_outside_a_tool_has_no_tool_name(self, tracker):
         with track_costs.workflow("w"):
             with track_costs.step("plain"):
