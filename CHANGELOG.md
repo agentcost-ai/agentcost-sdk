@@ -5,7 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [0.2.1] — unreleased
+## [0.2.2] - 2026-09-02
+
+### Changed
+- `track_costs.tool()` now works outside a `workflow()`: calls made inside it
+  carry `tool_name` (and nothing else) so guardrail compliance can see the tool
+  boundary without a declared run. Inside a workflow, behaviour is unchanged.
+
+## [0.2.1] — 2026-08-15
 
 All changes are additive: the public API is unchanged and the new event fields are
 optional, so a backend older than this release ignores them rather than storing them.
