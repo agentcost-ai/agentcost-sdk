@@ -5,7 +5,8 @@
 [AgentCost](https://agentcost.tech) is an open-source LLM cost observability platform. This is the
 Python SDK — add two lines to your app and every OpenAI, Anthropic, Gemini, and LangChain call is
 tracked with model, tokens, cost, and latency, attributed to the agent that made it.
-Docs: [agentcost.tech/docs/sdk](https://agentcost.tech/docs/sdk)
+Docs: [agentcost.tech/docs/sdk](https://agentcost.tech/docs/sdk) ·
+Project overview: [github.com/agentcost-ai/agentcost](https://github.com/agentcost-ai/agentcost)
 
 ## Installation
 
