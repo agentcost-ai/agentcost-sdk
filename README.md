@@ -59,6 +59,7 @@ response = llm.invoke("Hello!")
 - **Batched Sending**: Efficient network usage (size-based + time-based batching)
 - **Rate Limiting**: Built-in rate limiter to protect your backend
 - **Workflow Tracing**: Group a multi-step run and get cost per run, per step and per tool
+- **Coding Agents**: `agentcost connect claude-code` or `codex` tracks every session on the machine, with no code at all
 - **Pre-deployment Analysis**: `agentcost analyze` estimates cost and finds loops before you ship — entirely offline
 - **Local Mode**: Test without a backend
 
@@ -212,6 +213,68 @@ Use `--fail-on high` in CI to block a deploy on a cost regression:
 ```bash
 agentcost analyze ./agent --events run.json --fail-on high
 ```
+
+## Coding Agents: Claude Code and Codex
+
+Claude Code and Codex already log every model call on the machine they run on.
+Connect one and its sessions appear in AgentCost with no instrumentation:
+
+```bash
+pip install agentcost
+agentcost connect claude-code --api-key sk_...
+agentcost connect codex
+```
+
+`connect` imports the last 30 days and installs a hook, so each finished turn is
+sent as it happens — from any folder, in the terminal, the IDE extension or the
+desktop app. It is per machine: run it once on each one you work from. Codex
+asks you to trust a new hook, so open Codex and run `/hooks` once.
+
+Look before you send anything — this needs no API key and no account:
+
+```bash
+agentcost sync --dry-run
+```
+
+```
+Claude Code: would send 4,059 calls from 12 session(s), 1,915,622,519 tokens, $829.89 at API rates
+    $    524.00   3,227 calls  claude-opus-5-5
+    $    213.11     525 calls  claude-fable-5-1
+    Covered by a subscription: this is what the usage is worth, not a bill.
+```
+
+What you get in the dashboard:
+
+| AgentCost | Coding agent |
+|---|---|
+| Run (`trace_id`) | One session |
+| Workflow | `claude-code` or `codex` |
+| Agent | The main thread, or `claude-code/<subagent type>` |
+| Tool | The tool each call invoked — `Bash`, `Edit`, an MCP tool |
+| Session, user | `session_id`, and `--user` if you set one |
+
+**What leaves the machine:** token counts, model, tool names, session id and
+timestamps. Prompts, replies, tool arguments and tool output are never read.
+The working folder's name and git branch are sent only with `--include-repo`,
+and never the path or the remote URL.
+
+**Subscriptions.** On a Claude or ChatGPT plan nothing is billed per token, so
+the dollar figure is what the usage would cost at API rates. Each event says
+which it is in `metadata.billing` (`subscription` or `api`), detected
+automatically; `--billing` overrides it.
+
+| Command | Purpose |
+|---|---|
+| `agentcost connect <agent>` | Start tracking. `--backfill-days`, `--include-repo`, `--user`, `--billing`, `--base-url`, `--no-hook` |
+| `agentcost sync` | Send what is new. `--dry-run` shows it instead |
+| `agentcost status` | What is connected and what is waiting |
+| `agentcost disconnect <agent>` | Remove the hook; data already sent stays |
+
+A sync that is interrupted, repeated or run from several sessions at once never
+loses a call or counts one twice: each log has a cursor that moves only after
+the server accepted what came before it, and every call carries the provider's
+own id as its `event_id`. Without the hook (`--no-hook`), run `agentcost sync`
+yourself or on a schedule.
 
 ## Metadata
 

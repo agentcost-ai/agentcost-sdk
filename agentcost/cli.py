@@ -4,7 +4,12 @@ AgentCost command line interface.
     agentcost analyze ./agent --model gpt-4o --runs-per-day 2000
     agentcost analyze --events run.json --json report.json
 
-Runs entirely locally.
+    agentcost connect claude-code --api-key sk_...
+    agentcost sync --dry-run
+    agentcost status
+
+``analyze`` runs entirely locally. ``connect`` and ``sync`` send usage from
+Claude Code and Codex sessions on this machine to AgentCost.
 """
 
 from __future__ import annotations
@@ -15,13 +20,16 @@ import sys
 from typing import List, Optional, Sequence
 
 from . import __version__
+from .agents import SOURCES
+from .agents import hooks as agent_hooks
+from .agents import sync as agent_sync
 from .analyzer import DEFAULT_PATTERNS, analyze, format_report, load_events
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentcost",
-        description="Estimate what an agent will cost before deploying it.",
+        description="Estimate what an agent will cost, and track what coding agents spend.",
     )
     parser.add_argument("--version", action="version", version=f"agentcost {__version__}")
 
@@ -66,7 +74,201 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["high", "medium", "low"],
         help="Exit non-zero if a finding at or above this severity is present.",
     )
+
+    sources = sorted(SOURCES)
+
+    connect_parser = subparsers.add_parser(
+        "connect",
+        help="Track a coding agent's sessions on this machine.",
+    )
+    connect_parser.add_argument("source", choices=sources)
+    connect_parser.add_argument("--api-key", help="Project API key (or AGENTCOST_API_KEY).")
+    connect_parser.add_argument("--project-id", help="Looked up from the key when omitted.")
+    connect_parser.add_argument("--base-url", help="Backend URL, for a self-hosted AgentCost.")
+    connect_parser.add_argument(
+        "--backfill-days",
+        type=int,
+        default=30,
+        help="How much existing history to import (default: 30).",
+    )
+    connect_parser.add_argument(
+        "--include-repo",
+        action="store_true",
+        help="Also send the working folder's name and git branch.",
+    )
+    connect_parser.add_argument("--user", help="Attribute this machine's usage to a user id.")
+    connect_parser.add_argument(
+        "--billing",
+        choices=["api", "subscription"],
+        help="Override how this agent is paid for (detected when omitted).",
+    )
+    connect_parser.add_argument(
+        "--no-hook",
+        action="store_true",
+        help="Do not install the hook; run `agentcost sync` yourself.",
+    )
+
+    sync_parser = subparsers.add_parser("sync", help="Send new usage to AgentCost.")
+    sync_parser.add_argument("--source", choices=sources, help="Default: every connected agent.")
+    sync_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be sent. Sends nothing; needs no API key.",
+    )
+    sync_parser.add_argument("--quiet", action="store_true", help="No output; for hooks.")
+
+    subparsers.add_parser("status", help="Show connected agents and what is waiting.")
+
+    disconnect_parser = subparsers.add_parser("disconnect", help="Stop tracking a coding agent.")
+    disconnect_parser.add_argument("source", choices=sources)
+
     return parser
+
+
+def _print_sync(result: dict, dry_run: bool) -> None:
+    verb = "would send" if dry_run else "sent"
+    for name, summary in result["sources"].items():
+        label = SOURCES[name].LABEL
+        if not summary["calls"]:
+            print(f"{label}: nothing new")
+            continue
+        print(
+            f"{label}: {verb} {summary['calls']:,} calls from {summary['sessions']:,} "
+            f"session(s), {summary['tokens']:,} tokens, ${summary['cost']:,.2f} at API rates"
+        )
+        ranked = sorted(summary["models"].items(), key=lambda item: -item[1]["cost"])
+        for model, row in ranked:
+            print(f"    ${row['cost']:>10,.2f}  {row['calls']:>6,} calls  {model}")
+        if "subscription" in summary["billing"]:
+            print("    Covered by a subscription: this is what the usage is worth, not a bill.")
+    if not dry_run and not result["ok"]:
+        print(
+            "agentcost: the backend did not accept everything; the rest is kept "
+            "and goes with the next sync.",
+            file=sys.stderr,
+        )
+
+
+def _resolve_project(config: dict) -> Optional[str]:
+    """The project a key belongs to. Doubles as the check that the key works."""
+    import requests
+
+    try:
+        response = requests.get(
+            f"{config['base_url'].rstrip('/')}/v1/projects/me",
+            headers={"Authorization": f"Bearer {config['api_key']}"},
+            timeout=90,  # the hosted API can take a minute to wake from idle
+        )
+        return response.json().get("id") if response.ok else None
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def _connect(args) -> int:
+    source = SOURCES[args.source]
+    config = agent_sync.load_config()
+    config["api_key"] = args.api_key or config.get("api_key")
+    config["base_url"] = args.base_url or config["base_url"]
+    if not config["api_key"]:
+        print("agentcost: give --api-key, or set AGENTCOST_API_KEY", file=sys.stderr)
+        return 2
+
+    project_id = args.project_id or _resolve_project(config)
+    if not project_id:
+        print(
+            f"agentcost: {config['base_url']} did not accept that API key. "
+            "Nothing was changed.",
+            file=sys.stderr,
+        )
+        return 2
+    config["project_id"] = project_id
+
+    config["include_repo"] = args.include_repo or config.get("include_repo", False)
+    config["user"] = args.user or config.get("user")
+    settings = config["sources"].get(args.source) or {}
+    settings.setdefault("since", agent_sync.since_days(args.backfill_days))
+    if args.billing:
+        settings["billing"] = args.billing
+    config["sources"][args.source] = settings
+    agent_sync.save_config(config)
+    print(f"Connected {source.LABEL} to project {project_id}.")
+
+    if not args.no_hook:
+        try:
+            agent_hooks.install(source.hook_file(), source.HOOK_EVENTS, args.source)
+            print(f"Hook installed in {source.hook_file()}. {source.HOOK_NOTE}")
+        except (OSError, ValueError) as exc:
+            print(f"agentcost: could not install the hook: {exc}", file=sys.stderr)
+            print("Run `agentcost sync` yourself, or on a schedule, instead.")
+
+    result = agent_sync.run_sync(config, sources=[args.source])
+    _print_sync(result, dry_run=False)
+    return 0 if result["ok"] else 1
+
+
+def _sync(args) -> int:
+    config = agent_sync.load_config()
+    sources = [args.source] if args.source else None
+    if args.dry_run:
+        # Useful before connecting at all: look at every agent with history.
+        sources = sources or list(config["sources"]) or sorted(SOURCES)
+    elif not config.get("api_key") or not config.get("project_id") or not config["sources"]:
+        if not args.quiet:
+            print("agentcost: nothing is connected. Run `agentcost connect <agent>`.", file=sys.stderr)
+        return 0 if args.quiet else 2
+    elif sources and args.source not in config["sources"]:
+        if not args.quiet:
+            print(f"agentcost: {args.source} is not connected.", file=sys.stderr)
+        return 0 if args.quiet else 2
+
+    if not args.quiet:
+        result = agent_sync.run_sync(config, sources=sources, dry_run=args.dry_run)
+        if result["busy"]:
+            print("agentcost: another sync is running.")
+            return 0
+        _print_sync(result, args.dry_run)
+        return 0 if result["ok"] else 1
+
+    # From a hook: whatever goes wrong here must never reach the agent's session.
+    import logging
+    import warnings
+
+    logging.disable(logging.CRITICAL)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            agent_sync.run_sync(config, sources=sources, fetch_pricing=False)
+        except Exception:  # noqa: BLE001
+            pass
+    return 0
+
+
+def _status() -> int:
+    config = agent_sync.load_config()
+    if not config["sources"]:
+        print("No coding agent is connected. Run `agentcost connect <agent>`.")
+        return 0
+    print(f"Project {config.get('project_id')} at {config['base_url']}")
+    print(f"Last sync: {agent_sync.load_state().get('last_sync') or 'never'}")
+    pending = agent_sync.run_sync(config, dry_run=True)["sources"]
+    for name in config["sources"]:
+        source = SOURCES[name]
+        hook = "hook installed" if agent_hooks.is_installed(source.hook_file()) else "no hook"
+        print(f"  {source.LABEL}: {hook}, {pending[name]['calls']:,} call(s) waiting to sync")
+    return 0
+
+
+def _disconnect(args) -> int:
+    source = SOURCES[args.source]
+    config = agent_sync.load_config()
+    try:
+        agent_hooks.remove(source.hook_file())
+    except (OSError, ValueError) as exc:
+        print(f"agentcost: could not remove the hook: {exc}", file=sys.stderr)
+    if config["sources"].pop(args.source, None) is not None:
+        agent_sync.save_config(config)
+    print(f"Disconnected {source.LABEL}. Usage already sent stays in AgentCost.")
+    return 0
 
 
 def _should_fail(findings, threshold: str) -> bool:
@@ -79,6 +281,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if args.command == "connect":
+        return _connect(args)
+    if args.command == "sync":
+        return _sync(args)
+    if args.command == "status":
+        return _status()
+    if args.command == "disconnect":
+        return _disconnect(args)
     if args.command != "analyze":
         parser.print_help()
         return 0

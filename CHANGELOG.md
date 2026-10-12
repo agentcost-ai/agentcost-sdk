@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.0] - 2026-10-12
+
+### Added
+- **Claude Code and Codex tracking.** `agentcost connect claude-code` (or
+  `codex`) reads the session logs those agents already keep and sends each model
+  call as an ordinary event: a session is the run, the tool a call invoked is its
+  `tool_name`, and subagents are their own agents. A hook syncs after every turn.
+  `agentcost sync --dry-run` shows what would be sent without an API key.
+- `agentcost status` and `agentcost disconnect`.
+- Events from coding agents carry `metadata.billing` (`subscription` or `api`),
+  so usage covered by a plan can be told apart from metered spend.
+
+Only usage numbers, model names, tool names and ids are read. Prompt text,
+replies, tool arguments and tool output are never looked at. The working
+folder's name and branch are sent only with `--include-repo`.
+
 ## [0.2.2] - 2026-09-02
 
 ### Changed
