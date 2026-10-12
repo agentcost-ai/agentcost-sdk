@@ -5,6 +5,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.0] - 2026-10-12
+
+### Added
+- **Claude Code and Codex tracking.** `agentcost connect claude-code` (or
+  `codex`) reads the session logs those agents already keep and sends each model
+  call as an ordinary event: a session is the run, the tool a call invoked is its
+  `tool_name`, and subagents are their own agents. A hook syncs after every turn.
+  `agentcost sync --dry-run` shows what would be sent without an API key.
+- **Guardrails that block.** `agentcost connect <agent> --enforce` installs a
+  gate that runs before every tool call and prompt in Claude Code and Codex and
+  refuses what the project's guardrails or hard budget cap do not allow:
+  undeclared tools, writes by a read-only agent, undeclared models, per-run
+  tool-call and cost limits, and a spent budget. It answers in the hooks'
+  structured form, so the model is told why. It decides locally from a policy
+  the sync keeps current, never waits on the network, and allows the call
+  whenever it cannot decide. Needs a backend that serves
+  `GET /v1/guardrails/policy`.
+- Codex tools are reported under the names Codex's hooks use (`Bash`,
+  `apply_patch`), read out of the script Codex wraps each call in.
+- A request the API refused or dropped in Claude Code is recorded as a failed
+  call against the session's model, so error rate is real.
+- One-hour prompt-cache writes are priced at twice the input rate, as Anthropic
+  bills them, in local estimates and (with a current backend) on the server.
+- The sync hook starts the sync in its own process and returns, so a turn is
+  sent even when the agent exits immediately after it.
+- `agentcost` with no arguments lists every command and its main flags.
+- **Antigravity tracking, as an estimate.** `agentcost connect antigravity`
+  reads the per-conversation databases Antigravity keeps. The format is
+  undocumented, so events are marked `metadata.estimated`, carry no tool
+  attribution, and are never used for enforcement. Antigravity has no hooks; it
+  is synced whenever another connected agent syncs, or on a schedule.
+- A Claude Code call is identified by its API request id, the same id Claude
+  Code's OpenTelemetry export carries, so a machine reporting both through
+  `agentcost connect` and through the backend's OTLP receiver is counted once.
+- The sync hook now syncs every connected agent, not only the one that fired it.
+- `agentcost status` and `agentcost disconnect`.
+- Events from coding agents carry `metadata.billing` (`subscription` or `api`),
+  so usage covered by a plan can be told apart from metered spend.
+
+Only usage numbers, model names, tool names and ids are read. Prompt text,
+replies, tool arguments and tool output are never sent or kept. The working
+folder's name and branch are sent only with `--include-repo`.
+
 ## [0.2.2] - 2026-09-02
 
 ### Changed
