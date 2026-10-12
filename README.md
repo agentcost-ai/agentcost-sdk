@@ -263,9 +263,47 @@ the dollar figure is what the usage would cost at API rates. Each event says
 which it is in `metadata.billing` (`subscription` or `api`), detected
 automatically; `--billing` overrides it.
 
+### Enforcing guardrails
+
+Tracking tells you what happened. `--enforce` stops it before it happens:
+
+```bash
+agentcost connect claude-code --enforce
+```
+
+This adds a second hook, the gate, that runs before every tool call and every
+prompt and refuses the ones the project does not allow. It enforces the
+guardrail you declare in the dashboard for the agent named `claude-code` or
+`codex` (and `claude-code/<subagent type>`, which falls back to the main one):
+
+| Boundary | Effect |
+|---|---|
+| Allowed tools | A tool not on the list is refused (Claude Code) |
+| Read-only | A tool tagged as writing is refused (Claude Code) |
+| Max tool calls per run | Further tool calls in that session are refused |
+| Max cost per run | Further tool calls and prompts in that session are refused |
+| Monthly budget, hard cap | New prompts are refused once it is spent — metered usage only, never a subscription |
+
+The agent is told why, in words it can act on:
+
+```
+AgentCost guardrail: Write is not among the tools this project allows claude-code to use.
+```
+
+The gate never calls the network. It decides from the policy the last sync
+fetched and from the session's own log, so its totals are current to the call
+being judged, and it adds about a fifth of a second to a tool call. A guardrail
+changed in the dashboard applies from the next turn. If the gate cannot decide —
+no policy yet, a file it cannot read — it allows the call: it must never be the
+reason work stops.
+
+Codex names tools differently in hooks than in its logs, so for Codex the
+per-run limits and the budget are enforced and tool boundaries are reported but
+not blocked. Per-run limits are judged on the session's main thread.
+
 | Command | Purpose |
 |---|---|
-| `agentcost connect <agent>` | Start tracking. `--backfill-days`, `--include-repo`, `--user`, `--billing`, `--base-url`, `--no-hook` |
+| `agentcost connect <agent>` | Start tracking. `--enforce`, `--backfill-days`, `--include-repo`, `--user`, `--billing`, `--base-url`, `--no-hook` |
 | `agentcost sync` | Send what is new. `--dry-run` shows it instead |
 | `agentcost status` | What is connected and what is waiting |
 | `agentcost disconnect <agent>` | Remove the hook; data already sent stays |

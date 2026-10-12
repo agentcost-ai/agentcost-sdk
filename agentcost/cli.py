@@ -103,6 +103,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override how this agent is paid for (detected when omitted).",
     )
     connect_parser.add_argument(
+        "--enforce",
+        action="store_true",
+        help="Also refuse tool calls and prompts that break the project's "
+        "guardrails or budget, before they run.",
+    )
+    connect_parser.add_argument(
         "--no-hook",
         action="store_true",
         help="Do not install the hook; run `agentcost sync` yourself.",
@@ -164,6 +170,38 @@ def _resolve_project(config: dict) -> Optional[str]:
         return None
 
 
+def _print_enforcement(name: str, policy: Optional[dict]) -> None:
+    source = SOURCES[name]
+    if policy is None:
+        print(
+            "agentcost: this backend did not return a policy, so nothing is "
+            "enforced yet. It is fetched again on every sync.",
+            file=sys.stderr,
+        )
+        return
+    rail = policy["guardrails"].get(name)
+    limits = []
+    if rail:
+        if rail.get("allowed_tools") is not None and source.GATES_TOOLS:
+            limits.append(f"only these tools: {', '.join(rail['allowed_tools']) or 'none'}")
+        if rail.get("read_only") and source.GATES_TOOLS:
+            limits.append("no tool tagged as writing")
+        if rail.get("max_tool_calls_per_run"):
+            limits.append(f"at most {rail['max_tool_calls_per_run']} tool calls per session")
+        if rail.get("max_cost_per_run_usd"):
+            limits.append(f"at most ${rail['max_cost_per_run_usd']:.2f} per session")
+    if policy["budget"].get("mode") == "hard_cap":
+        limits.append("no new prompts once the monthly budget is spent (metered usage only)")
+    if limits:
+        print(f"Enforcing for {source.LABEL}: " + "; ".join(limits) + ".")
+    else:
+        print(
+            f"Enforcement is on, but the project declares no guardrail for the agent "
+            f"'{name}' and no hard budget cap. Declare one in the dashboard and it "
+            "applies from the next turn."
+        )
+
+
 def _connect(args) -> int:
     source = SOURCES[args.source]
     config = agent_sync.load_config()
@@ -189,17 +227,21 @@ def _connect(args) -> int:
     settings.setdefault("since", agent_sync.since_days(args.backfill_days))
     if args.billing:
         settings["billing"] = args.billing
+    settings["enforce"] = (args.enforce or settings.get("enforce", False)) and not args.no_hook
     config["sources"][args.source] = settings
     agent_sync.save_config(config)
     print(f"Connected {source.LABEL} to project {project_id}.")
 
     if not args.no_hook:
+        gate_events = source.GATE_EVENTS if settings["enforce"] else ()
         try:
-            agent_hooks.install(source.hook_file(), source.HOOK_EVENTS, args.source)
+            agent_hooks.install(source.hook_file(), source.HOOK_EVENTS, args.source, gate_events)
             print(f"Hook installed in {source.hook_file()}. {source.HOOK_NOTE}")
         except (OSError, ValueError) as exc:
             print(f"agentcost: could not install the hook: {exc}", file=sys.stderr)
             print("Run `agentcost sync` yourself, or on a schedule, instead.")
+    if settings["enforce"]:
+        _print_enforcement(args.source, agent_sync.refresh_policy(config, force=True))
 
     result = agent_sync.run_sync(config, sources=[args.source])
     _print_sync(result, dry_run=False)
@@ -254,6 +296,8 @@ def _status() -> int:
     for name in config["sources"]:
         source = SOURCES[name]
         hook = "hook installed" if agent_hooks.is_installed(source.hook_file()) else "no hook"
+        if agent_hooks.is_installed(source.hook_file(), agent_hooks.GATE_MARKER):
+            hook += ", enforcing guardrails"
         print(f"  {source.LABEL}: {hook}, {pending[name]['calls']:,} call(s) waiting to sync")
     return 0
 

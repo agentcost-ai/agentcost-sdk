@@ -13,18 +13,30 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
-# How an AgentCost hook is recognised among the user's own.
+# How AgentCost's hooks are recognised among the user's own.
 MARKER = "agentcost.cli sync"
+GATE_MARKER = "agentcost/agents/gate.py"
 
 
-def sync_command(source: str) -> str:
+def _python() -> str:
     # Forward slashes, and quotes only when needed: the same string has to run
     # under bash, cmd and PowerShell, and PowerShell will not execute a quoted
     # path without a call operator.
     python = Path(sys.executable).as_posix()
-    if " " in python:
-        python = f'"{python}"'
-    return f"{python} -m {MARKER} --quiet --source {source}"
+    return f'"{python}"' if " " in python else python
+
+
+def sync_command(source: str) -> str:
+    return f"{_python()} -m {MARKER} --quiet --source {source}"
+
+
+def gate_command(source: str) -> str:
+    # By file, not `-m`: the gate runs before every tool call, and running it
+    # as a module would import the whole SDK first. See gate.py.
+    script = Path(__file__).with_name("gate.py").as_posix()
+    if " " in script:
+        script = f'"{script}"'
+    return f"{_python()} {script} {source}"
 
 
 def _load(path: Path) -> Dict[str, Any]:
@@ -50,7 +62,8 @@ def _save(path: Path, data: Dict[str, Any]) -> None:
 
 
 def _is_ours(handler: Any) -> bool:
-    return isinstance(handler, dict) and MARKER in str(handler.get("command", ""))
+    command = str(handler.get("command", "")) if isinstance(handler, dict) else ""
+    return MARKER in command or GATE_MARKER in command
 
 
 def _without_ours(data: Dict[str, Any]) -> bool:
@@ -80,21 +93,28 @@ def _without_ours(data: Dict[str, Any]) -> bool:
     return found
 
 
-def is_installed(path: Path) -> bool:
+def is_installed(path: Path, marker: str = MARKER) -> bool:
     try:
-        return _without_ours(_load(path))
+        return marker in json.dumps(_load(path).get("hooks") or {})
     except ValueError:
         return False
 
 
-def install(path: Path, events: Iterable[str], source: str) -> None:
-    """Add the sync hook, replacing any earlier copy of it."""
+def install(
+    path: Path, events: Iterable[str], source: str, gate_events: Iterable[str] = ()
+) -> None:
+    """Add the sync hook, and the gate when asked, replacing earlier copies."""
     data = _load(path)
     _without_ours(data)
     hooks = data.setdefault("hooks", {})
-    handler = {"type": "command", "command": sync_command(source), "async": True}
+    sync = {"type": "command", "command": sync_command(source), "async": True}
     for event in events:
-        hooks.setdefault(event, []).append({"hooks": [dict(handler)]})
+        hooks.setdefault(event, []).append({"hooks": [dict(sync)]})
+    # The gate answers before the tool runs, so it cannot be async. It reads
+    # two small local files; the timeout only bounds a machine that is stuck.
+    gate = {"type": "command", "command": gate_command(source), "timeout": 10}
+    for event in gate_events:
+        hooks.setdefault(event, []).append({"hooks": [dict(gate)]})
     _save(path, data)
 
 

@@ -19,6 +19,11 @@ NAME = "codex"
 LABEL = "Codex"
 
 HOOK_EVENTS = ("Stop", "SessionStart")
+GATE_EVENTS = ("PreToolUse", "UserPromptSubmit")
+# Codex names tools differently in its hooks than in its rollouts, so an
+# allow-list built from observed usage would refuse everything. Per-run limits
+# and the budget are enforced; tool boundaries are reported, not blocked.
+GATES_TOOLS = False
 HOOK_NOTE = "Codex runs a new hook only after you trust it: open Codex and run /hooks once."
 
 
@@ -82,8 +87,13 @@ def _usage_event(
     )
 
 
+def find_session(session_id: str) -> Optional[Path]:
+    matches = list((home() / "sessions").glob(f"**/rollout-*{session_id}.jsonl"))
+    return matches[0] if matches else None
+
+
 def parse(
-    path: Path, offset: int, carry: Dict[str, Any]
+    path: Path, offset: int, carry: Dict[str, Any], include_open: bool = False
 ) -> Tuple[List[Dict[str, Any]], int, Dict[str, Any]]:
     """Events for the responses written after ``offset``, and where to resume.
 

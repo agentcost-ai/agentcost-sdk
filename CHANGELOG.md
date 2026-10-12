@@ -13,6 +13,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   call as an ordinary event: a session is the run, the tool a call invoked is its
   `tool_name`, and subagents are their own agents. A hook syncs after every turn.
   `agentcost sync --dry-run` shows what would be sent without an API key.
+- **Guardrails that block.** `agentcost connect <agent> --enforce` installs a
+  gate that runs before every tool call and prompt and refuses what the
+  project's guardrails or hard budget cap do not allow: undeclared tools and
+  writes by a read-only agent (Claude Code), and per-run tool-call and cost
+  limits and a spent budget (both). It decides locally from a policy the sync
+  keeps current, never waits on the network, and allows the call whenever it
+  cannot decide. Needs a backend that serves `GET /v1/guardrails/policy`.
 - `agentcost status` and `agentcost disconnect`.
 - Events from coding agents carry `metadata.billing` (`subscription` or `api`),
   so usage covered by a plan can be told apart from metered spend.

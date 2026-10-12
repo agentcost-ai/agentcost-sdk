@@ -21,6 +21,10 @@ NAME = "claude-code"
 LABEL = "Claude Code"
 
 HOOK_EVENTS = ("Stop", "SessionStart")
+GATE_EVENTS = ("PreToolUse", "UserPromptSubmit")
+# The hook names a tool exactly as the transcript does, so a tool boundary
+# declared from what the dashboard shows can be enforced as written.
+GATES_TOOLS = True
 HOOK_NOTE = "Claude Code picks the hook up in new sessions."
 
 # A call that ended by asking for tools is only known to be fully written once
@@ -116,10 +120,20 @@ def _to_event(path: Path, call: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     )
 
 
+def find_session(session_id: str) -> Optional[Path]:
+    matches = list((home() / "projects").glob(f"*/{session_id}.jsonl"))
+    return matches[0] if matches else None
+
+
 def parse(
-    path: Path, offset: int, carry: Dict[str, Any]
+    path: Path, offset: int, carry: Dict[str, Any], include_open: bool = False
 ) -> Tuple[List[Dict[str, Any]], int, Dict[str, Any]]:
-    """Events for the calls written after ``offset``, and where to resume."""
+    """Events for the calls written after ``offset``, and where to resume.
+
+    ``include_open`` also returns a final call that may still be growing. The
+    gate wants it, to count a run as it stands; a sync must not, because the
+    server keeps the first version of an event it is sent.
+    """
     calls: Dict[str, Dict[str, Any]] = {}
     last_id: Optional[str] = None
     end = offset
@@ -150,7 +164,7 @@ def parse(
 
     # The final call may still be growing tool blocks. Leave it for the next
     # sync rather than send it short: event ids are write-once on the server.
-    if last_id is not None:
+    if last_id is not None and not include_open:
         last = calls[last_id]
         still_open = last["stop"] in (None, "tool_use")
         if still_open and time.time() - path.stat().st_mtime < SETTLE_SECONDS:

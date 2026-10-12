@@ -30,6 +30,12 @@ LOCK_STALE_SECONDS = 300
 PACED_ABOVE_BATCHES = 60
 PACE_SECONDS = 0.7
 
+# How long the gate's copy of the policy is trusted before a sync refetches it.
+POLICY_MAX_AGE_SECONDS = 60
+
+# How long a finished session's running totals are kept for the gate.
+RUN_STATE_DAYS = 7
+
 Sender = Callable[[List[Dict[str, Any]]], bool]
 
 
@@ -37,7 +43,7 @@ def home() -> Path:
     return Path(os.environ.get("AGENTCOST_HOME") or Path.home() / ".agentcost")
 
 
-def _read(path: Path) -> Dict[str, Any]:
+def read_json(path: Path) -> Dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
@@ -45,7 +51,7 @@ def _read(path: Path) -> Dict[str, Any]:
         return {}
 
 
-def _write(path: Path, data: Dict[str, Any]) -> None:
+def write_json(path: Path, data: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -57,7 +63,7 @@ def _write(path: Path, data: Dict[str, Any]) -> None:
 
 
 def load_config() -> Dict[str, Any]:
-    config = _read(home() / "config.json")
+    config = read_json(home() / "config.json")
     config.setdefault("sources", {})
     config["api_key"] = os.environ.get("AGENTCOST_API_KEY") or config.get("api_key")
     config["base_url"] = (
@@ -67,11 +73,11 @@ def load_config() -> Dict[str, Any]:
 
 
 def save_config(config: Dict[str, Any]) -> None:
-    _write(home() / "config.json", config)
+    write_json(home() / "config.json", config)
 
 
 def load_state() -> Dict[str, Any]:
-    state = _read(home() / "state.json")
+    state = read_json(home() / "state.json")
     state.setdefault("files", {})
     return state
 
@@ -81,7 +87,7 @@ def since_days(days: int) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _load_pricing(base_url: str, fetch: bool) -> None:
+def load_pricing(base_url: str, fetch: bool) -> None:
     """Price estimates from the backend's catalogue, cached on disk for a day.
 
     The SDK's own fetch runs in the background with a short timeout, which
@@ -90,7 +96,7 @@ def _load_pricing(base_url: str, fetch: bool) -> None:
     without a cache it sends estimates of zero, and the server reprices anyway.
     """
     path = home() / "pricing.json"
-    cached = _read(path)
+    cached = read_json(path)
     fresh = cached.get("base_url") == base_url and time.time() - cached.get("at", 0) < 86400
     if not fresh and fetch:
         import requests
@@ -102,7 +108,7 @@ def _load_pricing(base_url: str, fetch: bool) -> None:
             pricing = None
         if pricing:
             cached = {"base_url": base_url, "at": time.time(), "pricing": pricing}
-            _write(path, cached)
+            write_json(path, cached)
     if cached.get("pricing"):
         get_pricing_manager().update_pricing(cached["pricing"])
 
@@ -148,13 +154,77 @@ def _finalize(event: Dict[str, Any], config: Dict[str, Any], billing: Optional[s
         metadata["user_id"] = config["user"]
     event["metadata"] = {key: value for key, value in metadata.items() if value is not None}
     # An estimate only: the server reprices every event from its catalogue.
-    event["cost"] = calculate_cost(
+    event["cost"] = price(event)
+
+
+def price(event: Dict[str, Any]) -> float:
+    return calculate_cost(
         event["model"],
         event["input_tokens"],
         event["output_tokens"],
         cached_tokens=event.get("cached_tokens", 0),
         cache_write_tokens=event.get("cache_write_tokens", 0),
     )
+
+
+def prepare_pricing(config: Dict[str, Any], fetch: bool) -> None:
+    # The calculator only consults the backend's catalogue once it has a config.
+    set_config(
+        AgentCostConfig(
+            api_key=config.get("api_key") or "",
+            project_id=config.get("project_id") or "",
+            base_url=config["base_url"],
+        )
+    )
+    load_pricing(config["base_url"], fetch=fetch)
+
+
+def refresh_policy(config: Dict[str, Any], force: bool = False) -> Optional[Dict[str, Any]]:
+    """Fetch what the gate enforces and keep it where the gate can read it.
+
+    The gate runs before every tool call and never touches the network; it
+    decides from this file. The sync after each turn keeps it current, so a
+    guardrail changed in the dashboard applies from the next turn. If the
+    backend cannot be reached the previous policy stays in force.
+    """
+    path = home() / "policy.json"
+    held = read_json(path)
+    if held and not force and time.time() - held.get("at", 0) < POLICY_MAX_AGE_SECONDS:
+        return held
+
+    import requests
+
+    try:
+        response = requests.get(
+            f"{config['base_url'].rstrip('/')}/v1/guardrails/policy",
+            headers={"Authorization": f"Bearer {config['api_key']}"},
+            timeout=90 if force else 10,
+        )
+        served = response.json() if response.ok else None
+    except (requests.RequestException, ValueError):
+        served = None
+    if not isinstance(served, dict):
+        return held or None
+
+    policy = {
+        "at": time.time(),
+        "guardrails": {rail["agent_name"]: rail for rail in served.get("guardrails") or []},
+        "tool_tags": served.get("tool_tags") or {},
+        "budget": served.get("budget") or {},
+    }
+    write_json(path, policy)
+    return policy
+
+
+def _prune_runs() -> None:
+    """Drop the gate's per-session totals for sessions long finished."""
+    cutoff = time.time() - RUN_STATE_DAYS * 86400
+    for path in (home() / "runs").glob("*.json"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
 
 
 def _summarize(events: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -189,15 +259,7 @@ def run_sync(
     names = list(sources) if sources else list(config["sources"])
     result: Dict[str, Any] = {"ok": True, "busy": False, "sources": {}}
 
-    # The calculator only consults the backend's catalogue once it has a config.
-    set_config(
-        AgentCostConfig(
-            api_key=config.get("api_key") or "",
-            project_id=config.get("project_id") or "",
-            base_url=config["base_url"],
-        )
-    )
-    _load_pricing(config["base_url"], fetch=fetch_pricing)
+    prepare_pricing(config, fetch=fetch_pricing)
 
     with _Lock() as lock:
         if not lock.held and not dry_run:
@@ -258,7 +320,11 @@ def run_sync(
                 if collected <= sent:
                     state["files"][key] = entry
             state["last_sync"] = datetime.now(timezone.utc).isoformat()
-            _write(home() / "state.json", state)
+            write_json(home() / "state.json", state)
+
+            if any((config["sources"].get(name) or {}).get("enforce") for name in names):
+                refresh_policy(config)
+                _prune_runs()
 
         for name in names:
             result["sources"][name] = _summarize(by_source[name])

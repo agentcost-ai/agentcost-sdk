@@ -501,7 +501,7 @@ def test_cli_connect_then_disconnect(homes, capsys, monkeypatch):
     _both_sessions(homes)
     sent = Recorder()
     monkeypatch.setattr(agent_sync, "_http_sender", lambda config: sent)
-    monkeypatch.setattr(agent_sync, "_load_pricing", lambda base_url, fetch: None)
+    monkeypatch.setattr(agent_sync, "load_pricing", lambda base_url, fetch: None)
 
     code = main(["connect", "codex", "--api-key", "sk_test", "--project-id", "proj", "--backfill-days", "36500"])
 
