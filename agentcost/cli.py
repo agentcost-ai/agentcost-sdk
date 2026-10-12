@@ -26,10 +26,49 @@ from .agents import sync as agent_sync
 from .analyzer import DEFAULT_PATTERNS, analyze, format_report, load_events
 
 
+# What `agentcost` prints on its own: every command, grouped by what it is for,
+# with the flags people reach for first. `--help` on a command has the rest.
+OVERVIEW = """\
+AgentCost {version}
+
+TRACK A CODING AGENT ON THIS MACHINE          <agent>: {agents}
+
+  agentcost sync --dry-run          See what would be sent. Needs no key; sends nothing.
+  agentcost connect <agent>         Start tracking: imports 30 days, then syncs after every turn.
+      --api-key sk_...                Project API key (first time only, or set AGENTCOST_API_KEY)
+      --enforce                       Also block calls that break the project's guardrails or budget
+      --user NAME                     Attribute this machine's usage to a developer
+      --include-repo                  Also send the working folder's name and git branch
+      --backfill-days N               How much history to import (default 30)
+      --base-url URL                  A self-hosted AgentCost
+  agentcost status                  What is connected, whether hooks are in place, what is waiting
+  agentcost sync                    Send what is new right now (the hook does this for you)
+  agentcost disconnect <agent>      Stop tracking. What was already sent stays.
+
+  Only token counts, model, tool names and ids are read. Never prompts or replies.
+
+ESTIMATE AN AGENT BEFORE YOU DEPLOY IT        runs offline, sends nothing
+
+  agentcost analyze ./agent --model gpt-4o        What the prompt and skill files cost per call
+      --events run.json --runs-per-day 2000         Cost per run and per month, from a recorded run
+      --fail-on high                                Exit non-zero on a finding; for CI
+      --json report.json                            Also write the full report
+
+TRACK YOUR OWN PYTHON APP
+
+  from agentcost import track_costs
+  track_costs.init(api_key="sk_...", project_id="...")
+
+  agentcost <command> --help        Every flag for one command
+  Docs                              https://agentcost.tech/docs
+"""
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentcost",
         description="Estimate what an agent will cost, and track what coding agents spend.",
+        epilog="Run `agentcost` with no arguments for an overview of every command.",
     )
     parser.add_argument("--version", action="version", version=f"agentcost {__version__}")
 
@@ -228,11 +267,16 @@ def _connect(args) -> int:
     if args.billing:
         settings["billing"] = args.billing
     settings["enforce"] = (args.enforce or settings.get("enforce", False)) and not args.no_hook
+    if settings["enforce"] and not source.GATE_EVENTS:
+        print(f"agentcost: {source.LABEL} has no hook to enforce with; tracking only.", file=sys.stderr)
+        settings["enforce"] = False
     config["sources"][args.source] = settings
     agent_sync.save_config(config)
     print(f"Connected {source.LABEL} to project {project_id}.")
 
-    if not args.no_hook:
+    if not source.HOOK_EVENTS:
+        print(source.HOOK_NOTE)
+    elif not args.no_hook:
         gate_events = source.GATE_EVENTS if settings["enforce"] else ()
         try:
             agent_hooks.install(source.hook_file(), source.HOOK_EVENTS, args.source, gate_events)
@@ -295,8 +339,9 @@ def _status() -> int:
     pending = agent_sync.run_sync(config, dry_run=True)["sources"]
     for name in config["sources"]:
         source = SOURCES[name]
-        hook = "hook installed" if agent_hooks.is_installed(source.hook_file()) else "no hook"
-        if agent_hooks.is_installed(source.hook_file(), agent_hooks.GATE_MARKER):
+        target = source.hook_file()
+        hook = "hook installed" if target and agent_hooks.is_installed(target) else "no hook"
+        if target and agent_hooks.is_installed(target, agent_hooks.GATE_MARKER):
             hook += ", enforcing guardrails"
         print(f"  {source.LABEL}: {hook}, {pending[name]['calls']:,} call(s) waiting to sync")
     return 0
@@ -306,7 +351,8 @@ def _disconnect(args) -> int:
     source = SOURCES[args.source]
     config = agent_sync.load_config()
     try:
-        agent_hooks.remove(source.hook_file())
+        if source.hook_file():
+            agent_hooks.remove(source.hook_file())
     except (OSError, ValueError) as exc:
         print(f"agentcost: could not remove the hook: {exc}", file=sys.stderr)
     if config["sources"].pop(args.source, None) is not None:
@@ -334,7 +380,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "disconnect":
         return _disconnect(args)
     if args.command != "analyze":
-        parser.print_help()
+        print(OVERVIEW.format(version=__version__, agents=", ".join(sorted(SOURCES))))
         return 0
 
     if not args.path and not args.events:

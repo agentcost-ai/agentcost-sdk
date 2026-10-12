@@ -120,6 +120,20 @@ def test_claude_one_event_per_api_message(homes):
     assert "tool_name" not in events[1]
 
 
+def test_claude_event_id_is_the_request_id_the_otel_export_uses(homes):
+    path = _claude_session(
+        homes,
+        [
+            _assistant("msg_1", [TEXT], requestId="req_011Cfx6TtUm8F6k6qCda8TDs"),
+            _assistant("msg_1", [_tool("Read")], stop="end_turn", requestId="req_011Cfx6TtUm8F6k6qCda8TDs"),
+        ],
+    )
+
+    events, _, _ = claude_code.parse(path, 0, {})
+
+    assert [event["event_id"] for event in events] == ["cc-req_011Cfx6TtUm8F6k6qCda8TDs"]
+
+
 def test_claude_never_carries_content(homes):
     path = _claude_session(homes, [_assistant("msg_1", [TEXT, _tool("Bash")], stop="end_turn")])
 
@@ -217,6 +231,10 @@ def _token_count(total, plan="go", last=USAGE):
     )
 
 
+SECOND_USAGE = {**USAGE, "input_tokens": 26222, "output_tokens": 108}
+FIRST_CX = codex.call_id(SESSION, 14565, 11008, 103)
+SECOND_CX = codex.call_id(SESSION, 26222, 11008, 108)
+
 CODEX_HEAD = [
     _codex_row(
         "session_meta",
@@ -249,7 +267,7 @@ def test_codex_one_event_per_response(homes):
             _codex_row("token_usage_record", {"session_id": SESSION, "response_id": "resp_1", "usage": USAGE}),
             _codex_row("response_item", {"type": "custom_tool_call_output", "output": "never read"}),
             _token_count(14668),
-            _codex_row("token_usage_record", {"session_id": SESSION, "response_id": "resp_2", "usage": USAGE}),
+            _codex_row("token_usage_record", {"session_id": SESSION, "response_id": "resp_2", "usage": SECOND_USAGE}),
             _token_count(29336),
         ],
     )
@@ -257,7 +275,7 @@ def test_codex_one_event_per_response(homes):
     events, offset, carry = codex.parse(path, 0, {})
 
     # The token_count beside each record is the same response, not another one.
-    assert [event["event_id"] for event in events] == ["cx-resp_1", "cx-resp_2"]
+    assert [event["event_id"] for event in events] == [FIRST_CX, SECOND_CX]
     first = events[0]
     assert first["model"] == "gpt-6-luna"
     assert first["input_tokens"] == 14565
@@ -277,7 +295,12 @@ def test_codex_one_event_per_response(homes):
 def test_codex_older_rollouts_use_token_count(homes):
     path = _codex_session(
         homes,
-        CODEX_HEAD + [_token_count(14668, plan=None), _token_count(14668, plan=None), _token_count(29336, plan=None)],
+        CODEX_HEAD
+        + [
+            _token_count(14668, plan=None),
+            _token_count(14668, plan=None),
+            _token_count(40998, plan=None, last=SECOND_USAGE),
+        ],
     )
 
     events, _, _ = codex.parse(path, 0, {})
@@ -344,7 +367,7 @@ def test_sync_sends_once(homes):
     result = agent_sync.run_sync(_config(), sender=sender, fetch_pricing=False)
 
     assert result["ok"] and result["sent"] == 2
-    assert sorted(sender.ids) == ["cc-msg_1", "cx-resp_1"]
+    assert sorted(sender.ids) == ["cc-msg_1", FIRST_CX]
     assert result["sources"]["claude-code"]["calls"] == 1
     assert result["sources"]["claude-code"]["cost"] > 0
 
@@ -366,7 +389,7 @@ def test_sync_keeps_what_was_refused(homes):
 
     retry = Recorder()
     agent_sync.run_sync(_config(), sender=retry, fetch_pricing=False)
-    assert sorted(retry.ids) == ["cc-msg_1", "cx-resp_1"]
+    assert sorted(retry.ids) == ["cc-msg_1", FIRST_CX]
 
 
 def test_sync_dry_run_sends_and_remembers_nothing(homes):
@@ -400,8 +423,8 @@ def test_sync_sends_repo_name_when_asked(homes):
     by_id = {event["event_id"]: event["metadata"] for batch in sender.batches for event in batch}
     assert by_id["cc-msg_1"]["repo"] == "billing-svc"
     assert by_id["cc-msg_1"]["branch"] == "main"
-    assert by_id["cx-resp_1"]["repo"] == "PricingEngine"
-    assert by_id["cx-resp_1"]["user_id"] == "alice"
+    assert by_id[FIRST_CX]["repo"] == "PricingEngine"
+    assert by_id[FIRST_CX]["user_id"] == "alice"
     assert "C:\\\\work" not in json.dumps(sender.batches)
 
 
@@ -412,7 +435,7 @@ def test_sync_ignores_history_before_the_backfill_window(homes):
 
     agent_sync.run_sync(config, sender=sender, fetch_pricing=False)
 
-    assert sender.ids == ["cx-resp_1"]
+    assert sender.ids == [FIRST_CX]
 
 
 def test_sync_steps_aside_for_a_running_sync(homes):
@@ -450,7 +473,7 @@ def test_hook_install_keeps_everything_else(homes):
     assert data["hooks"]["Stop"][0] == theirs
     assert len(data["hooks"]["Stop"]) == 2 and len(data["hooks"]["SessionStart"]) == 1
     ours = data["hooks"]["Stop"][1]["hooks"][0]
-    assert ours["async"] is True and ours["command"].endswith("--quiet --source claude-code")
+    assert "async" not in ours and ours["command"].endswith("agentcost/agents/sync_hook.py")
     assert hooks.is_installed(path)
     assert json.loads((homes / "claude" / "settings.json.agentcost-backup").read_text()) == original
 
@@ -487,6 +510,21 @@ def test_cli_quiet_sync_is_silent_when_nothing_is_connected(homes, capsys):
     assert captured.out == "" and captured.err == ""
 
 
+def test_cli_alone_lists_every_command(homes, capsys):
+    assert main([]) == 0
+    out = capsys.readouterr().out
+
+    for command in ("connect", "sync", "status", "disconnect", "analyze"):
+        assert f"agentcost {command}" in out
+    assert "antigravity, claude-code, codex" in out
+    # A flag promised in the overview has to exist.
+    for flag in ("--enforce", "--user", "--include-repo", "--backfill-days", "--base-url"):
+        assert flag in out
+        with pytest.raises(SystemExit) as stopped:
+            main(["connect", "--help"])
+        assert stopped.value.code == 0 and flag in capsys.readouterr().out
+
+
 def test_cli_sync_says_when_nothing_is_connected(homes, capsys):
     assert main(["sync"]) == 2
     assert "agentcost connect" in capsys.readouterr().err
@@ -506,7 +544,7 @@ def test_cli_connect_then_disconnect(homes, capsys, monkeypatch):
     code = main(["connect", "codex", "--api-key", "sk_test", "--project-id", "proj", "--backfill-days", "36500"])
 
     assert code == 0
-    assert sent.ids == ["cx-resp_1"]  # only the agent that was connected
+    assert sent.ids == [FIRST_CX]  # only the agent that was connected
     assert hooks.is_installed(codex.hook_file())
     assert "/hooks" in capsys.readouterr().out
     assert agent_sync.load_config()["sources"].keys() == {"codex"}

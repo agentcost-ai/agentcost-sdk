@@ -98,28 +98,31 @@ def test_read_only_refuses_only_tools_known_to_write(homes):
     assert gate.decide("claude-code", _pre_tool("Untagged")) is None
 
 
-def test_codex_tool_names_are_not_judged(homes):
-    _policy(homes, [{"agent_name": "codex", "allowed_tools": []}])
+def test_codex_tools_are_judged_under_the_names_its_hooks_use(homes):
+    _policy(homes, [{"agent_name": "codex", "allowed_tools": ["Bash"]}])
 
     assert gate.decide("codex", _pre_tool("Bash")) is None
+    assert "apply_patch" in gate.decide("codex", _pre_tool("apply_patch"))
 
 
 # -- Per-run limits --------------------------------------------------------
 
 
-def test_counts_tool_calls_up_to_the_one_being_asked(homes):
+def test_a_limit_of_n_allows_exactly_n_tool_calls(homes):
+    """The call being asked about is already in the log when the hook fires."""
     path = _claude_session(
         homes,
         [_assistant("msg_1", [_tool("Read")]), TOOL_RESULT, _assistant("msg_2", [_tool("Bash")])],
     )
-    _policy(homes, [{"agent_name": "claude-code", "max_tool_calls_per_run": 3}])
+    _policy(homes, [{"agent_name": "claude-code", "max_tool_calls_per_run": 2}])
+    # The second call of two: within the limit.
     assert gate.decide("claude-code", _pre_tool("Bash", path)) is None
     # Asked again, the open call is still one call, not two.
     assert gate.decide("claude-code", _pre_tool("Bash", path)) is None
 
     _append(path, [TOOL_RESULT, _assistant("msg_3", [_tool("Bash")])])
     reason = gate.decide("claude-code", _pre_tool("Bash", path))
-    assert "3 tool calls" in reason and "new session" in reason
+    assert "2 tool calls" in reason and "new session" in reason
     # A limit on tool calls does not stop the conversation itself.
     assert gate.decide("claude-code", _prompt(path)) is None
 
@@ -136,20 +139,22 @@ def test_stops_a_run_over_its_cost_limit(homes):
 
 
 def test_finds_a_codex_session_by_id(homes):
-    _codex_session(
-        homes,
-        CODEX_HEAD
-        + [
+    def call(tokens):
+        return [
             _codex_row("response_item", {"type": "custom_tool_call", "name": "exec"}),
             _codex_row(
                 "token_usage_record",
-                {"session_id": SESSION, "response_id": "resp_1", "usage": USAGE},
+                {"session_id": SESSION, "usage": {**USAGE, "input_tokens": tokens}},
             ),
-        ],
-    )
-    _policy(homes, [{"agent_name": "codex", "max_tool_calls_per_run": 1}])
+        ]
 
-    assert "1 tool calls" in gate.decide("codex", _pre_tool("Bash"))
+    path = _codex_session(homes, CODEX_HEAD + call(14565))
+    _policy(homes, [{"agent_name": "codex", "max_tool_calls_per_run": 1}])
+    # Its first tool call, as a live Codex run logs it before asking.
+    assert gate.decide("codex", _pre_tool("Bash")) is None
+
+    _append(path, call(26222))
+    assert "limit of 1 tool call this" in gate.decide("codex", _pre_tool("Bash"))
 
 
 # -- Budget ----------------------------------------------------------------
@@ -221,15 +226,32 @@ def _run_gate(homes, source, stdin):
     )
 
 
-def test_blocks_with_exit_2_and_a_reason(homes):
+def test_refuses_a_tool_call_in_the_form_both_agents_take(homes):
     _policy(homes, [{"agent_name": "claude-code", "allowed_tools": ["Read"]}])
 
     blocked = _run_gate(homes, "claude-code", json.dumps(_pre_tool("Bash")).encode())
-    assert blocked.returncode == 2
-    assert b"AgentCost guardrail: Bash" in blocked.stderr
+    # Exit 0 with a structured answer: an exit code alone does not carry the
+    # reason through to the model in Codex.
+    assert blocked.returncode == 0 and blocked.stderr == b""
+    answer = json.loads(blocked.stdout)["hookSpecificOutput"]
+    assert answer["hookEventName"] == "PreToolUse"
+    assert answer["permissionDecision"] == "deny"
+    assert answer["permissionDecisionReason"].startswith("AgentCost guardrail: Bash is not among")
 
     allowed = _run_gate(homes, "claude-code", json.dumps(_pre_tool("Read")).encode())
-    assert allowed.returncode == 0 and allowed.stderr == b""
+    assert allowed.returncode == 0 and allowed.stdout == b"" and allowed.stderr == b""
+
+
+def test_refuses_a_prompt_in_the_form_both_agents_take(homes):
+    path = _claude_session(homes, [_assistant("msg_1", [TEXT], stop="end_turn")])
+    _policy(homes, budget=_budget())
+    _connected(billing="api")
+
+    blocked = _run_gate(homes, "claude-code", json.dumps(_prompt(path)).encode())
+
+    answer = json.loads(blocked.stdout)
+    assert blocked.returncode == 0
+    assert answer["decision"] == "block" and "budget" in answer["reason"]
 
 
 def test_run_limits_work_without_the_sdk_loaded(homes):
@@ -242,18 +264,22 @@ def test_run_limits_work_without_the_sdk_loaded(homes):
 
     blocked = _run_gate(homes, "claude-code", json.dumps(_pre_tool("Read", path)).encode())
 
-    assert blocked.returncode == 2, blocked.stderr
-    assert b"per run" in blocked.stderr
+    assert blocked.returncode == 0, blocked.stderr
+    assert b"per run" in blocked.stdout
 
 
 def test_lets_work_continue_when_it_cannot_decide(homes):
     _policy(homes, [{"agent_name": "claude-code", "allowed_tools": ["Read"]}])
     event = json.dumps(_pre_tool("Bash")).encode()
 
-    assert _run_gate(homes, "claude-code", b"not json").returncode == 0
-    assert _run_gate(homes, "no-such-agent", event).returncode == 0
+    def allowed(source, stdin):
+        result = _run_gate(homes, source, stdin)
+        return result.returncode == 0 and result.stdout == b""
+
+    assert allowed("claude-code", b"not json")
+    assert allowed("no-such-agent", event)
     (homes / "agentcost" / "policy.json").write_text("{ broken", encoding="utf-8")
-    assert _run_gate(homes, "claude-code", event).returncode == 0
+    assert allowed("claude-code", event)
 
 
 # -- Installing and refreshing --------------------------------------------

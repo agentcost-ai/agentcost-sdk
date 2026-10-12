@@ -14,29 +14,31 @@ from pathlib import Path
 from typing import Any, Dict, Iterable
 
 # How AgentCost's hooks are recognised among the user's own.
-MARKER = "agentcost.cli sync"
+MARKER = "agentcost/agents/sync_hook.py"
 GATE_MARKER = "agentcost/agents/gate.py"
 
 
-def _python() -> str:
-    # Forward slashes, and quotes only when needed: the same string has to run
-    # under bash, cmd and PowerShell, and PowerShell will not execute a quoted
-    # path without a call operator.
-    python = Path(sys.executable).as_posix()
-    return f'"{python}"' if " " in python else python
+def _run(script: str) -> str:
+    """The command that runs one of this package's hook scripts.
+
+    By file, not ``python -m``: a hook runs on every turn or every tool call,
+    and running it as a module would import the whole SDK first. Forward
+    slashes, and quotes only when needed: the same string has to run under
+    bash, cmd and PowerShell, and PowerShell will not execute a quoted path
+    without a call operator.
+    """
+    parts = [Path(sys.executable).as_posix(), Path(__file__).with_name(script).as_posix()]
+    return " ".join(f'"{part}"' if " " in part else part for part in parts)
 
 
-def sync_command(source: str) -> str:
-    return f"{_python()} -m {MARKER} --quiet --source {source}"
+def sync_command() -> str:
+    # Every connected agent, not only this one: an agent with no hooks of its
+    # own (Antigravity) is swept along whenever any other finishes a turn.
+    return _run("sync_hook.py")
 
 
 def gate_command(source: str) -> str:
-    # By file, not `-m`: the gate runs before every tool call, and running it
-    # as a module would import the whole SDK first. See gate.py.
-    script = Path(__file__).with_name("gate.py").as_posix()
-    if " " in script:
-        script = f'"{script}"'
-    return f"{_python()} {script} {source}"
+    return f"{_run('gate.py')} {source}"
 
 
 def _load(path: Path) -> Dict[str, Any]:
@@ -107,7 +109,9 @@ def install(
     data = _load(path)
     _without_ours(data)
     hooks = data.setdefault("hooks", {})
-    sync = {"type": "command", "command": sync_command(source), "async": True}
+    # Not async: it returns as soon as the real sync is started, and an agent
+    # that is exiting waits for a hook that is not async but kills one that is.
+    sync = {"type": "command", "command": sync_command(), "timeout": 10}
     for event in events:
         hooks.setdefault(event, []).append({"hooks": [dict(sync)]})
     # The gate answers before the tool runs, so it cannot be async. It reads

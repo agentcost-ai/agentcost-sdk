@@ -90,9 +90,11 @@ def _to_event(path: Path, call: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     return build_event(
         source=NAME,
-        # The API message id, not the transcript line: a resumed session copies
+        # The API request, not the transcript line: a resumed session copies
         # its history into a new file, and the call must not be counted twice.
-        event_id=bounded_id("cc-", call["id"]),
+        # The request id is also what Claude Code's own OpenTelemetry export
+        # carries, so a machine reporting both ways is still counted once.
+        event_id=bounded_id("cc-", row.get("requestId") or call["id"]),
         session_id=session_id,
         agent_name=f"{NAME}/{subagent}" if subagent else NAME,
         model=call["model"],
@@ -120,6 +122,26 @@ def _to_event(path: Path, call: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     )
 
 
+def _failure(path: Path, row: Dict[str, Any], model: str) -> Dict[str, Any]:
+    """A request the API refused or dropped: no usage, but it did fail."""
+    status = row.get("apiErrorStatus")
+    reason = str(row.get("error") or "api_error")
+    return build_event(
+        source=NAME,
+        event_id=bounded_id("cc-err-", str(row.get("uuid") or row.get("timestamp"))),
+        session_id=row.get("sessionId") or path.stem,
+        agent_name=NAME,
+        model=model,
+        timestamp=row.get("timestamp") or "",
+        input_tokens=0,
+        output_tokens=0,
+        cwd=row.get("cwd"),
+        branch=row.get("gitBranch"),
+        extra={"client_version": row.get("version"), "surface": row.get("entrypoint")},
+        error=f"{reason} ({status})" if status else reason,
+    )
+
+
 def find_session(session_id: str) -> Optional[Path]:
     matches = list((home() / "projects").glob(f"*/{session_id}.jsonl"))
     return matches[0] if matches else None
@@ -134,7 +156,9 @@ def parse(
     gate wants it, to count a run as it stands; a sync must not, because the
     server keeps the first version of an event it is sent.
     """
+    carry = dict(carry)
     calls: Dict[str, Dict[str, Any]] = {}
+    failures: List[Dict[str, Any]] = []
     last_id: Optional[str] = None
     end = offset
 
@@ -144,8 +168,15 @@ def parse(
             continue
         message = row.get("message") or {}
         message_id, usage, model = message.get("id"), message.get("usage"), message.get("model")
+        if row.get("isApiErrorMessage"):
+            # Claude Code writes these itself, under a placeholder model. The
+            # failure belongs to the model the session was talking to.
+            if carry.get("model"):
+                failures.append(_failure(path, row, carry["model"]))
+            continue
         if not message_id or not usage or not model or model == _SYNTHETIC_MODEL:
             continue
+        carry["model"] = model
 
         # One API message is written as one line per content block, each
         # repeating the same usage, with tool results interleaved.
@@ -172,4 +203,4 @@ def parse(
             end = last["start"]
 
     events = [event for event in (_to_event(path, call) for call in calls.values()) if event]
-    return events, end, carry
+    return events + failures, end, carry

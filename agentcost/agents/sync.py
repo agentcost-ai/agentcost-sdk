@@ -158,13 +158,17 @@ def _finalize(event: Dict[str, Any], config: Dict[str, Any], billing: Optional[s
 
 
 def price(event: Dict[str, Any]) -> float:
+    written = event.get("cache_write_tokens", 0)
+    # One-hour cache writes cost twice the input rate, not the catalogue's
+    # five-minute write rate. The server prices them the same way.
+    one_hour = min(event["metadata"].get("cache_write_1h_tokens") or 0, written)
     return calculate_cost(
         event["model"],
         event["input_tokens"],
         event["output_tokens"],
         cached_tokens=event.get("cached_tokens", 0),
-        cache_write_tokens=event.get("cache_write_tokens", 0),
-    )
+        cache_write_tokens=written - one_hour,
+    ) + calculate_cost(event["model"], 2 * one_hour, 0)
 
 
 def prepare_pricing(config: Dict[str, Any], fetch: bool) -> None:
@@ -282,7 +286,9 @@ def run_sync(
                 key = str(path)
                 entry = state["files"].get(key) or {}
                 try:
-                    size = path.stat().st_size
+                    # Bytes for a log that only grows; a source whose file does
+                    # not (SQLite) says for itself what marks a change.
+                    size = source.version(path) if hasattr(source, "version") else path.stat().st_size
                     offset = entry.get("offset", 0)
                     carry = entry.get("carry") or {}
                     if offset > size:  # replaced by a shorter file: start over

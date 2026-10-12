@@ -68,6 +68,7 @@ def build_event(
     cwd: Optional[str] = None,
     branch: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
 ) -> Dict[str, Any]:
     """One model call as an AgentCost event.
 
@@ -101,7 +102,7 @@ def build_event(
         "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
         "timestamp": timestamp,
-        "success": True,
+        "success": error is None,
         "trace_id": session_id[:MAX_ID_LENGTH],
         "workflow": source,
         "step_name": step_name,
@@ -114,4 +115,6 @@ def build_event(
         event["cache_write_tokens"] = cache_write_tokens
     if tools:
         event["tool_name"] = tools[0]
+    if error:
+        event["error"] = error
     return event

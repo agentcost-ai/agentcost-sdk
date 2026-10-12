@@ -22,9 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-EXIT_ALLOW = 0
-# Claude Code and Codex both read exit 2 as "blocked" and show stderr as why.
-EXIT_BLOCK = 2
+PREFIX = "AgentCost guardrail: "
 
 
 def _in_period(budget: Dict[str, Any]) -> bool:
@@ -51,6 +49,7 @@ def _run_totals(source: Any, sync: Any, hook: Dict[str, Any], priced: bool) -> D
         "tool_calls": state.get("tool_calls", 0),
         "cost": state.get("cost", 0.0),
         "billing": state.get("billing"),
+        "model": state.get("model"),
     }
 
     path = hook.get("transcript_path") or source.find_session(session)
@@ -64,6 +63,7 @@ def _run_totals(source: Any, sync: Any, hook: Dict[str, Any], priced: bool) -> D
             totals["tool_calls"] += 1 if event.get("tool_name") else 0
             totals["cost"] += sync.price(event) if priced else 0.0
             totals["billing"] = event["metadata"].get("billing") or totals["billing"]
+            totals["model"] = event["model"]
 
     settled, offset, carry = source.parse(
         Path(path), state.get("offset", 0), state.get("carry") or {}
@@ -103,6 +103,7 @@ def decide(source_name: str, hook: Dict[str, Any]) -> Optional[str]:
 
     max_calls = rail.get("max_tool_calls_per_run")
     max_cost = rail.get("max_cost_per_run_usd")
+    models = rail.get("allowed_models")
     budget = policy.get("budget") or {}
     capped = (
         event == "UserPromptSubmit"
@@ -110,15 +111,27 @@ def decide(source_name: str, hook: Dict[str, Any]) -> Optional[str]:
         and budget.get("mode") == "hard_cap"
         and _in_period(budget)
     )
-    if not (max_calls or max_cost or capped):
+    if not (max_calls or max_cost or capped or models is not None):
         return None
 
     run = _run_totals(source, sync, hook, priced=bool(max_cost))
 
-    if max_calls and event == "PreToolUse" and run["tool_calls"] >= max_calls:
+    # Codex names the model in the hook; Claude Code's is the one its latest
+    # call used. A session's very first prompt has neither and is let through.
+    model = hook.get("model") or run["model"]
+    if models is not None and model and model not in models:
         return (
-            f"this session has made {run['tool_calls']} tool calls, the most this "
-            f"project allows {source_name} in one run ({max_calls}). Start a new session."
+            f"{model} is not among the models this project allows {source_name} to use "
+            f"({', '.join(models) or 'none'}). Switch model to continue."
+        )
+
+    # The call being asked about is already in the log and so already counted:
+    # the limit is passed only when the count goes over it.
+    if max_calls and event == "PreToolUse" and run["tool_calls"] > max_calls:
+        return (
+            f"this session has reached the limit of {max_calls} tool "
+            f"call{'' if max_calls == 1 else 's'} this project allows {source_name} "
+            f"in one run. Start a new session."
         )
     if max_cost and run["cost"] > max_cost:
         return (
@@ -137,16 +150,34 @@ def decide(source_name: str, hook: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def refusal(hook: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    """The hook's answer, in the form Claude Code and Codex both take.
+
+    Not an exit code: both stop the call on exit 2, but Codex then tells the
+    model only that the call was rejected. This form carries the reason to the
+    model, which is what lets it explain the refusal instead of retrying.
+    """
+    message = PREFIX + reason
+    if hook.get("hook_event_name") == "PreToolUse":
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": message,
+            }
+        }
+    return {"decision": "block", "reason": message}
+
+
 def main(argv: Any) -> int:
     try:
         hook = json.loads(sys.stdin.buffer.read() or b"{}")
         reason = decide(argv[1], hook)
+        if reason:
+            sys.stdout.write(json.dumps(refusal(hook, reason)))
     except Exception:  # noqa: BLE001
-        return EXIT_ALLOW
-    if not reason:
-        return EXIT_ALLOW
-    sys.stderr.write(f"AgentCost guardrail: {reason}\n")
-    return EXIT_BLOCK
+        pass
+    return 0
 
 
 if __name__ == "__main__":

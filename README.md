@@ -214,21 +214,28 @@ Use `--fail-on high` in CI to block a deploy on a cost regression:
 agentcost analyze ./agent --events run.json --fail-on high
 ```
 
-## Coding Agents: Claude Code and Codex
+## Coding Agents: Claude Code, Codex and Antigravity
 
-Claude Code and Codex already log every model call on the machine they run on.
-Connect one and its sessions appear in AgentCost with no instrumentation:
+These agents already log every model call on the machine they run on. Connect
+one and its sessions appear in AgentCost with no instrumentation:
 
 ```bash
 pip install agentcost
 agentcost connect claude-code --api-key sk_...
 agentcost connect codex
+agentcost connect antigravity
 ```
 
 `connect` imports the last 30 days and installs a hook, so each finished turn is
 sent as it happens — from any folder, in the terminal, the IDE extension or the
 desktop app. It is per machine: run it once on each one you work from. Codex
 asks you to trust a new hook, so open Codex and run `/hooks` once.
+
+**Antigravity** has no usage export and no hooks. Its figures are read from the
+undocumented per-conversation database it keeps, so they are marked
+`estimated`, carry no tool attribution, and are sent whenever another connected
+agent syncs (or when you run `agentcost sync` on a schedule). Conversations from
+before June 2026 are encrypted and cannot be read.
 
 Look before you send anything — this needs no API key and no account:
 
@@ -254,7 +261,9 @@ What you get in the dashboard:
 | Session, user | `session_id`, and `--user` if you set one |
 
 **What leaves the machine:** token counts, model, tool names, session id and
-timestamps. Prompts, replies, tool arguments and tool output are never read.
+timestamps. Prompts, replies, tool arguments and tool output are never sent or
+kept. Codex wraps each tool call in a short script;
+that script is scanned for the tool name and nothing else is taken from it.
 The working folder's name and git branch are sent only with `--include-repo`,
 and never the path or the remote URL.
 
@@ -278,8 +287,9 @@ guardrail you declare in the dashboard for the agent named `claude-code` or
 
 | Boundary | Effect |
 |---|---|
-| Allowed tools | A tool not on the list is refused (Claude Code) |
-| Read-only | A tool tagged as writing is refused (Claude Code) |
+| Allowed tools | A tool not on the list is refused |
+| Read-only | A tool tagged as writing is refused |
+| Allowed models | Tool calls and prompts are refused while the session is on a model not on the list |
 | Max tool calls per run | Further tool calls in that session are refused |
 | Max cost per run | Further tool calls and prompts in that session are refused |
 | Monthly budget, hard cap | New prompts are refused once it is spent — metered usage only, never a subscription |
@@ -297,12 +307,20 @@ changed in the dashboard applies from the next turn. If the gate cannot decide �
 no policy yet, a file it cannot read — it allows the call: it must never be the
 reason work stops.
 
-Codex names tools differently in hooks than in its logs, so for Codex the
-per-run limits and the budget are enforced and tool boundaries are reported but
-not blocked. Per-run limits are judged on the session's main thread.
+All of it applies to Claude Code and to Codex. Codex's tools are reported under
+the names its hooks use (its shell is `Bash`, file edits are `apply_patch`), so a
+boundary written from what the dashboard shows is enforced as written. Per-run
+limits are judged on the session's main thread. A model boundary takes effect
+from a session's second prompt in Claude Code, which does not name the model
+before its first call. Antigravity has no hooks and is never enforced.
+
+The hooks never hold up a session: the sync hook starts the sync in a process of
+its own and returns, so the turn is sent even when the agent exits straight
+after it, as a headless run does.
 
 | Command | Purpose |
 |---|---|
+| `agentcost` | List every command and what it does |
 | `agentcost connect <agent>` | Start tracking. `--enforce`, `--backfill-days`, `--include-repo`, `--user`, `--billing`, `--base-url`, `--no-hook` |
 | `agentcost sync` | Send what is new. `--dry-run` shows it instead |
 | `agentcost status` | What is connected and what is waiting |
@@ -313,6 +331,28 @@ loses a call or counts one twice: each log has a cursor that moves only after
 the server accepted what came before it, and every call carries the provider's
 own id as its `event_id`. Without the hook (`--no-hook`), run `agentcost sync`
 yourself or on a schedule.
+
+### Without installing anything: OpenTelemetry
+
+Claude Code and Codex can export their own telemetry, and the AgentCost backend
+accepts it at `/v1/otlp`. Set it once in managed settings and every session in
+an organisation reports in, including ones that run in the cloud and leave no
+local log. Claude Code:
+
+```bash
+CLAUDE_CODE_ENABLE_TELEMETRY=1
+OTEL_LOGS_EXPORTER=otlp
+OTEL_METRICS_EXPORTER=none
+OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+OTEL_EXPORTER_OTLP_ENDPOINT=https://api.agentcost.tech/v1/otlp
+OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk_..."
+OTEL_RESOURCE_ATTRIBUTES="agentcost.billing=subscription"   # or api
+```
+
+Only the per-call usage records are read; everything else in the export is
+discarded unread. A machine that also runs `agentcost connect` is counted once,
+because both paths identify a call by its API request id. This path tracks
+only — enforcement needs the hook.
 
 ## Metadata
 
