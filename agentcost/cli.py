@@ -39,6 +39,7 @@ TRACK A CODING AGENT ON THIS MACHINE          <agent>: {agents}
       --enforce                       Also block calls that break the project's guardrails or budget
       --user NAME                     Attribute this machine's usage to a developer
       --include-repo                  Also send the working folder's name and git branch
+      --session-names                 Also send each chat's title, to list sessions by name
       --backfill-days N               How much history to import (default 30)
       --base-url URL                  A self-hosted AgentCost
   agentcost status                  What is connected, whether hooks are in place, what is waiting
@@ -135,6 +136,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also send the working folder's name and git branch.",
     )
+    connect_parser.add_argument(
+        "--session-names",
+        action="store_true",
+        help="Also send each chat's title, so sessions are listed by name. "
+        "A title summarises what was asked.",
+    )
     connect_parser.add_argument("--user", help="Attribute this machine's usage to a user id.")
     connect_parser.add_argument(
         "--billing",
@@ -186,6 +193,8 @@ def _print_sync(result: dict, dry_run: bool) -> None:
             print(f"    ${row['cost']:>10,.2f}  {row['calls']:>6,} calls  {model}")
         if "subscription" in summary["billing"]:
             print("    Covered by a subscription: this is what the usage is worth, not a bill.")
+    if result.get("named"):
+        print(f"Named {result['named']:,} session(s).")
     if not dry_run and not result["ok"]:
         print(
             "agentcost: the backend did not accept everything; the rest is kept "
@@ -261,6 +270,7 @@ def _connect(args) -> int:
     config["project_id"] = project_id
 
     config["include_repo"] = args.include_repo or config.get("include_repo", False)
+    config["session_names"] = args.session_names or config.get("session_names", False)
     config["user"] = args.user or config.get("user")
     settings = config["sources"].get(args.source) or {}
     settings.setdefault("since", agent_sync.since_days(args.backfill_days))

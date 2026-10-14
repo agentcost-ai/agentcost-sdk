@@ -231,6 +231,41 @@ def _prune_runs() -> None:
             pass
 
 
+def _new_session_names(
+    names: Sequence[str], state: Dict[str, Any]
+) -> "tuple[List[Dict[str, Any]], Dict[str, Any]]":
+    """Names not yet sent, and what to remember once they have been.
+
+    Kept apart from the event cursors: a chat is usually titled after its first
+    calls were sent, and a chat that finished before names were switched on has
+    nothing new to send but its name.
+    """
+    seen = state.get("names") or {}
+    records: List[Dict[str, Any]] = []
+    remember: Dict[str, Any] = {}
+    for name in names:
+        source = SOURCES[name]
+        if not hasattr(source, "session_name"):
+            continue
+        for path in source.session_files():
+            key = str(path)
+            known = seen.get(key) or {}
+            try:
+                modified = path.stat().st_mtime_ns
+                if known.get("mtime") == modified:
+                    continue
+                found = source.session_name(path)
+            except OSError:
+                continue
+            title = found[1] if found else known.get("name")
+            remember[key] = {"mtime": modified, "name": title}
+            if found and found[1] != known.get("name"):
+                records.append(
+                    {"record_type": "session", "session_id": found[0], "name": found[1]}
+                )
+    return records, remember
+
+
 def _summarize(events: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     models: Dict[str, Dict[str, Any]] = {}
     for event in events:
@@ -325,6 +360,16 @@ def run_sync(
             for collected, key, entry in marks:
                 if collected <= sent:
                     state["files"][key] = entry
+            if config.get("session_names") and result["ok"]:
+                records, remember = _new_session_names(names, state)
+                batches = [
+                    records[index : index + MAX_SERVER_BATCH_SIZE]
+                    for index in range(0, len(records), MAX_SERVER_BATCH_SIZE)
+                ]
+                if all(send(batch) for batch in batches):
+                    state.setdefault("names", {}).update(remember)
+                    result["named"] = len(records)
+
             state["last_sync"] = datetime.now(timezone.utc).isoformat()
             write_json(home() / "state.json", state)
 

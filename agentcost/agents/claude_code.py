@@ -142,6 +142,35 @@ def _failure(path: Path, row: Dict[str, Any], model: str) -> Dict[str, Any]:
     )
 
 
+# Claude Code rewrites a chat's title into the transcript on every prompt, so
+# the end of the file always has the current one.
+_TITLE_TAIL_BYTES = 2_000_000
+
+
+def session_name(path: Path) -> Optional[Tuple[str, str]]:
+    """``(session id, title)`` for a chat Claude Code has titled.
+
+    The title is a short summary of what was asked, which makes it the one
+    piece of conversation content AgentCost can send. It is sent only when the
+    user connected with ``--session-names``.
+    """
+    if path.parent.name == "subagents":
+        return None
+    with open(path, "rb") as handle:
+        handle.seek(max(0, path.stat().st_size - _TITLE_TAIL_BYTES))
+        tail = handle.read()
+    for raw in reversed(tail.splitlines()):
+        if b'"ai-title"' not in raw:
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        if row.get("type") == "ai-title" and row.get("aiTitle"):
+            return str(row.get("sessionId") or path.stem), str(row["aiTitle"])
+    return None
+
+
 def find_session(session_id: str) -> Optional[Path]:
     matches = list((home() / "projects").glob(f"*/{session_id}.jsonl"))
     return matches[0] if matches else None

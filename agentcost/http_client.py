@@ -20,6 +20,7 @@ logger = logging.getLogger("agentcost")
 
 
 OUTCOME_RECORD = "outcome"
+SESSION_RECORD = "session"
 
 
 def partition_records(records: List[Dict]):
@@ -163,13 +164,23 @@ class AgentCostHTTPClient:
             'X-AgentCost-SDK-Version': __version__,
         }
 
-        events, outcomes = partition_records(records)
+        # Session names travel with the batch but are neither events nor outcomes.
+        sessions = [
+            {k: v for k, v in record.items() if k != "record_type"}
+            for record in records
+            if record.get("record_type") == SESSION_RECORD
+        ]
+        events, outcomes = partition_records(
+            [record for record in records if record.get("record_type") != SESSION_RECORD]
+        )
         payload = {
             'project_id': project_id,
             'events': events,
         }
         if outcomes:
             payload['outcomes'] = outcomes
+        if sessions:
+            payload['sessions'] = sessions
 
         if self.debug:
             print(f"[AgentCost] Sending {len(events)} events to {url}")

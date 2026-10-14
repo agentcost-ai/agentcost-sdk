@@ -10,6 +10,7 @@ event, whose ``last_token_usage`` is the same figure.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from pathlib import Path
@@ -114,6 +115,33 @@ def _usage_event(
             "reasoning_tokens": usage.get("reasoning_output_tokens"),
         },
     )
+
+
+_SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def session_name(path: Path) -> Optional[Tuple[str, str]]:
+    """``(session id, thread name)`` for a thread Codex has named.
+
+    Codex keeps thread names in one index beside its sessions. Sent only when
+    the user connected with ``--session-names``.
+    """
+    match = _SESSION_ID.search(path.stem)
+    if not match:
+        return None
+    try:
+        lines = (home() / "session_index.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    name = None
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("id") == match.group(0) and row.get("thread_name"):
+            name = str(row["thread_name"])  # the index is appended to: last wins
+    return (match.group(0), name) if name else None
 
 
 def find_session(session_id: str) -> Optional[Path]:

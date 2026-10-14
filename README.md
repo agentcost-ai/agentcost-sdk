@@ -267,6 +267,12 @@ that script is scanned for the tool name and nothing else is taken from it.
 The working folder's name and git branch are sent only with `--include-repo`,
 and never the path or the remote URL.
 
+**Session names.** To see which chat cost the most by name instead of by id,
+connect with `--session-names`. It sends the title Claude Code gives each chat
+and the thread name Codex gives each thread. It is off by default because a
+title is a short summary of what you asked. Chats that were already synced get
+their names on the next sync.
+
 **Subscriptions.** On a Claude or ChatGPT plan nothing is billed per token, so
 the dollar figure is what the usage would cost at API rates. Each event says
 which it is in `metadata.billing` (`subscription` or `api`), detected
@@ -321,7 +327,7 @@ after it, as a headless run does.
 | Command | Purpose |
 |---|---|
 | `agentcost` | List every command and what it does |
-| `agentcost connect <agent>` | Start tracking. `--enforce`, `--backfill-days`, `--include-repo`, `--user`, `--billing`, `--base-url`, `--no-hook` |
+| `agentcost connect <agent>` | Start tracking. `--enforce`, `--backfill-days`, `--include-repo`, `--session-names`, `--user`, `--billing`, `--base-url`, `--no-hook` |
 | `agentcost sync` | Send what is new. `--dry-run` shows it instead |
 | `agentcost status` | What is connected and what is waiting |
 | `agentcost disconnect <agent>` | Remove the hook; data already sent stays |

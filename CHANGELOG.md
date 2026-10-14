@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.1] - 2026-10-12
+
+### Added
+- **Session names.** `agentcost connect <agent> --session-names` also sends the
+  title Claude Code gives each chat and the thread name Codex gives each thread,
+  so sessions and runs are listed by name. Off by default: a title summarises
+  what was asked, which makes it the one piece of conversation content AgentCost
+  can send. Names are sent once per title and separately from usage, so chats
+  that were synced before the option was turned on get their names too. Needs a
+  backend that accepts `sessions` on `/v1/events/batch`.
+
 ## [0.3.0] - 2026-10-12
 
 ### Added
